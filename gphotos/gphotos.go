@@ -249,10 +249,24 @@ func batchFilenames(ctx context.Context, c *http.Client, gd *globalData, mediaKe
 	if err != nil {
 		return nil, err
 	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, err
+
+	// The item list lives at raw[0][1], not at the top level — confirmed
+	// against the reference Python client's parse_response_data for EWgK9e
+	// (`safe_get(data, 0, 1)`). Unmarshaling raw directly as the item list,
+	// as this used to do, silently matched nothing: every filename lookup
+	// came back empty and every download fell back to the opaque media-key
+	// hash as its filename.
+	var outer []json.RawMessage
+	if err := json.Unmarshal(raw, &outer); err != nil || len(outer) == 0 {
+		return nil, fmt.Errorf("unexpected EWgK9e response shape: %s", raw)
 	}
+	var wrapper []json.RawMessage
+	if err := json.Unmarshal(outer[0], &wrapper); err != nil || len(wrapper) < 2 {
+		return nil, fmt.Errorf("unexpected EWgK9e response shape: %s", raw)
+	}
+	var items []json.RawMessage
+	json.Unmarshal(wrapper[1], &items) // absent/null -> no items, not an error
+
 	out := make(map[string]string, len(items))
 	for _, ri := range items {
 		var arr []json.RawMessage
@@ -348,9 +362,42 @@ func loadCookiesFromNetscapeFile(jar *cookiejar.Jar, path string) error {
 
 // ---- download ----
 
+// claimFilename returns a name for item, based on Google's own filename for
+// it (name, which may be empty if the lookup failed or the item has none),
+// that's guaranteed not to collide with anything already on disk in destDir
+// or already claimed earlier in this run. used tracks names claimed so far
+// this run; the caller owns it and should pass the same map for every item.
+//
+// Google filenames like "IMG_0001.jpg" or "DSC_0001.jpg" collide constantly
+// across different devices/import sessions, and a mirror tool overwriting a
+// previously-downloaded photo because a later, unrelated one happens to
+// share its name would be silent data loss. So on any collision this always
+// appends a numeric suffix rather than ever overwriting an existing file.
+func claimFilename(destDir, name string, used map[string]bool) string {
+	if name == "" {
+		return name
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	candidate := name
+	for i := 2; ; i++ {
+		if !used[candidate] {
+			if _, err := os.Stat(filepath.Join(destDir, candidate)); os.IsNotExist(err) {
+				break
+			}
+		}
+		candidate = fmt.Sprintf("%s-%d%s", base, i, ext)
+	}
+	used[candidate] = true
+	return candidate
+}
+
 func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, filename, destDir string) error {
 	if item.BaseURL == "" {
 		return fmt.Errorf("no base url for %s", item.MediaKey)
+	}
+	if filename == "" {
+		filename = item.MediaKey
 	}
 	// "=d" = original quality photo bytes. Videos need "=dv"; distinguishing
 	// them reliably requires the item's feature-map (see parser.py in gpwc —
@@ -368,9 +415,6 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 		ct := resp.Header.Get("Content-Type")
 		if resp.StatusCode == 200 && (strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")) {
 			defer resp.Body.Close()
-			if filename == "" {
-				filename = item.MediaKey
-			}
 			out, err := os.Create(filepath.Join(destDir, filename))
 			if err != nil {
 				return err
@@ -432,6 +476,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 
 	var pageID *string
 	total, skipped := 0, 0
+	usedNames := map[string]bool{} // claimed filenames this run, for claimFilename
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -462,7 +507,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 				stop = true
 				break // items are newest-first; once we're past "after", we're done
 			}
-			fn := names[it.MediaKey]
+			fn := claimFilename(destDir, names[it.MediaKey], usedNames)
 			log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
 			if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
 				log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
