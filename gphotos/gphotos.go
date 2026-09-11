@@ -414,10 +414,22 @@ func resolveFilename(destDir, name, mediaKey string, used map[string]bool) (fina
 	return candidate, alreadyOnDisk
 }
 
+// tmpSuffix marks a file as a download in progress. downloadOriginal never
+// lets a file under this name be mistaken for a finished one: it writes
+// here first and only renames to the real filename after io.Copy returns
+// successfully, so a download cut short — network failure, or the process
+// getting killed outright (ctrl-C doesn't run deferred Close()s) — leaves
+// only a "*.gphotos-tmp" behind, never a truncated file at the real name
+// that resolveFilename's later runs could mistake for a complete one.
+const tmpSuffix = ".gphotos-tmp"
+
 func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, filename, destDir string) error {
 	if item.BaseURL == "" {
 		return fmt.Errorf("no base url for %s", item.MediaKey)
 	}
+	finalPath := filepath.Join(destDir, filename)
+	tmpPath := finalPath + tmpSuffix
+
 	// "=d" = original quality photo bytes. Videos need "=dv"; distinguishing
 	// them reliably requires the item's feature-map (see parser.py in gpwc —
 	// LibraryItem.video_duration) which this minimal port skips. As a cheap
@@ -433,18 +445,47 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 		}
 		ct := resp.Header.Get("Content-Type")
 		if resp.StatusCode == 200 && (strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")) {
-			defer resp.Body.Close()
-			out, err := os.Create(filepath.Join(destDir, filename))
+			err := writeBody(tmpPath, resp.Body)
+			resp.Body.Close()
 			if err != nil {
+				os.Remove(tmpPath)
 				return err
 			}
-			defer out.Close()
-			_, err = io.Copy(out, resp.Body)
-			return err
+			return os.Rename(tmpPath, finalPath)
 		}
 		resp.Body.Close()
 	}
 	return fmt.Errorf("could not fetch original bytes for %s", item.MediaKey)
+}
+
+func writeBody(path string, r io.Reader) error {
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, r)
+	return err
+}
+
+// removeStaleTempFiles deletes any leftover "*.gphotos-tmp" files in
+// destDir: downloads interrupted before their rename to a final name could
+// happen. They're always safe to delete — a media key only gets recorded in
+// the local index after that rename succeeds, so nothing depends on a
+// .gphotos-tmp file's contents, and leaving them around forever would just
+// be clutter (and, if their name happened to already sit in usedNames,
+// unnecessary disambiguation pressure on genuinely new items).
+func removeStaleTempFiles(destDir string) error {
+	matches, err := filepath.Glob(filepath.Join(destDir, "*"+tmpSuffix))
+	if err != nil {
+		return err
+	}
+	for _, m := range matches {
+		if err := os.Remove(m); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---- local download index: skip items already mirrored on a prior run ----
@@ -555,6 +596,9 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	idx, err := loadDownloadIndex(destDir)
 	if err != nil {
 		return fmt.Errorf("loading download index: %w", err)
+	}
+	if err := removeStaleTempFiles(destDir); err != nil {
+		log.Printf("gphotos: cleaning up stale temp files: %v", err)
 	}
 
 	log.Printf("gphotos: mirroring %s into %s", source, destDir)

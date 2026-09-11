@@ -1,10 +1,15 @@
 package gphotos
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseBatchFilenames(t *testing.T) {
@@ -75,6 +80,79 @@ func TestResolveFilenameDisambiguatesKnownCollision(t *testing.T) {
 	name2, adopted2 := resolveFilename(dir, "IMG_0001.jpg", "mk3", used)
 	if name2 != "IMG_0001-3.jpg" || adopted2 {
 		t.Fatalf("got %q, adopted=%v", name2, adopted2)
+	}
+}
+
+func TestDownloadOriginalWritesViaTempThenRename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("photo bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/photo"}
+	if err := downloadOriginal(context.Background(), srv.Client(), item, "photo.jpg", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "photo.jpg"))
+	if err != nil || !bytes.Equal(got, []byte("photo bytes")) {
+		t.Fatalf("final file: got %q, %v", got, err)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*"+tmpSuffix)); len(matches) != 0 {
+		t.Fatalf("leftover temp file(s) after successful download: %v", matches)
+	}
+}
+
+func TestDownloadOriginalCanceledLeavesNoFinalFile(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		<-block // hang until the client gives up, simulating a cut-short download
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/photo"}
+	if err := downloadOriginal(ctx, srv.Client(), item, "photo.jpg", dir); err == nil {
+		t.Fatal("expected an error from a canceled download")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "photo.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("final file should not exist after a canceled download, stat err = %v", err)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*"+tmpSuffix)); len(matches) != 0 {
+		t.Fatalf("temp file should have been cleaned up, found: %v", matches)
+	}
+}
+
+func TestRemoveStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "IMG_0001.jpg"+tmpSuffix)
+	keep := filepath.Join(dir, "IMG_0002.jpg")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeStaleTempFiles(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file should be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("unrelated file should be untouched: %v", err)
 	}
 }
 
