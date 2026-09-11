@@ -623,24 +623,24 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 					log.Printf("gphotos: adopting existing %s into index (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
 					idx.record(it.MediaKey, fn, it.TimestampMS)
 					adopted++
-					continue
+				} else {
+					log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
+					if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
+						log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
+						skipped++
+						continue
+					}
+					idx.record(it.MediaKey, fn, it.TimestampMS)
+					total++
 				}
-				log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
-				if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
-					log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
-					skipped++
-					continue
-				}
-				idx.record(it.MediaKey, fn, it.TimestampMS)
-				total++
-			}
-		}
 
-		// Save after every page (not just at the end) so a run interrupted
-		// partway through doesn't lose credit for what it already
-		// downloaded and re-fetch it next time.
-		if err := idx.save(); err != nil {
-			log.Printf("gphotos: saving download index: %v", err)
+				// Save after every item, not just at the end of a page, so
+				// a run interrupted mid-page doesn't lose credit for what
+				// it already downloaded and re-fetch it next time.
+				if err := idx.save(); err != nil {
+					log.Printf("gphotos: saving download index: %v", err)
+				}
+			}
 		}
 
 		if stop || next == nil {
