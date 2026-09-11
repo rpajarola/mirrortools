@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -249,13 +250,17 @@ func batchFilenames(ctx context.Context, c *http.Client, gd *globalData, mediaKe
 	if err != nil {
 		return nil, err
 	}
+	return parseBatchFilenames(raw)
+}
 
-	// The item list lives at raw[0][1], not at the top level — confirmed
-	// against the reference Python client's parse_response_data for EWgK9e
-	// (`safe_get(data, 0, 1)`). Unmarshaling raw directly as the item list,
-	// as this used to do, silently matched nothing: every filename lookup
-	// came back empty and every download fell back to the opaque media-key
-	// hash as its filename.
+// parseBatchFilenames extracts media_key -> filename from an EWgK9e RPC
+// response. The item list lives at raw[0][1], not at the top level —
+// confirmed against the reference Python client's parse_response_data for
+// EWgK9e (`safe_get(data, 0, 1)`). Unmarshaling raw directly as the item
+// list, as this used to do, silently matched nothing: every filename lookup
+// came back empty and every download fell back to the opaque media-key hash
+// as its filename.
+func parseBatchFilenames(raw json.RawMessage) (map[string]string, error) {
 	var outer []json.RawMessage
 	if err := json.Unmarshal(raw, &outer); err != nil || len(outer) == 0 {
 		return nil, fmt.Errorf("unexpected EWgK9e response shape: %s", raw)
@@ -428,6 +433,71 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 	return fmt.Errorf("could not fetch original bytes for %s", item.MediaKey)
 }
 
+// ---- local download index: skip items already mirrored on a prior run ----
+
+// indexFileName is written inside destDir. It's namespaced to this backend
+// since destDir is generally dedicated to one mirror.Method, but nothing
+// stops two methods from sharing a directory.
+const indexFileName = ".gphotos-index.json"
+
+// downloadIndex records, per Google Photos media key, that an item has
+// already been downloaded into destDir — so a later run can skip it instead
+// of re-fetching. It's keyed by MediaKey rather than filename since
+// claimFilename may rename an item to avoid a collision.
+//
+// The index is the source of truth for "already downloaded", not the
+// filesystem: a run never re-checks whether the recorded file is still on
+// disk. If you delete a file after it's been mirrored, it will NOT come back
+// on a later run — the index still says it's done. Delete the index (or the
+// specific entry) if you want an item re-downloaded.
+type downloadIndex struct {
+	path    string
+	entries map[string]indexEntry
+}
+
+type indexEntry struct {
+	Filename    string `json:"filename"`
+	TimestampMS int64  `json:"timestamp_ms"`
+}
+
+func loadDownloadIndex(destDir string) (*downloadIndex, error) {
+	idx := &downloadIndex{path: filepath.Join(destDir, indexFileName), entries: map[string]indexEntry{}}
+	data, err := os.ReadFile(idx.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return idx, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &idx.entries); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", idx.path, err)
+	}
+	return idx, nil
+}
+
+func (idx *downloadIndex) has(mediaKey string) bool {
+	_, ok := idx.entries[mediaKey]
+	return ok
+}
+
+func (idx *downloadIndex) record(mediaKey, filename string, timestampMS int64) {
+	idx.entries[mediaKey] = indexEntry{Filename: filename, TimestampMS: timestampMS}
+}
+
+// save writes the index atomically (write-then-rename) so a process killed
+// mid-write can't leave a corrupt index behind.
+func (idx *downloadIndex) save() error {
+	data, err := json.MarshalIndent(idx.entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := idx.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, idx.path)
+}
+
 // ---- Mirror: walk the library newest-first, stop once older than after ----
 
 // Mirror downloads Google Photos items into destDir, using the session
@@ -468,6 +538,11 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 		return fmt.Errorf("session bootstrap failed: %w", err)
 	}
 
+	idx, err := loadDownloadIndex(destDir)
+	if err != nil {
+		return fmt.Errorf("loading download index: %w", err)
+	}
+
 	log.Printf("gphotos: mirroring %s into %s", source, destDir)
 
 	firstTS := beforeT.UnixMilli()
@@ -475,7 +550,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	afterTS := afterT.UnixMilli()
 
 	var pageID *string
-	total, skipped := 0, 0
+	total, alreadyHave, skipped := 0, 0, 0
 	usedNames := map[string]bool{} // claimed filenames this run, for claimFilename
 	for {
 		if err := ctx.Err(); err != nil {
@@ -490,32 +565,57 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 			break
 		}
 
-		// keys, batched, for filename resolution
-		keys := make([]string, len(items))
-		for i, it := range items {
-			keys[i] = it.MediaKey
-		}
-		names, err := batchFilenames(ctx, client, gd, keys)
-		if err != nil {
-			log.Printf("gphotos: filename lookup failed, falling back to media_key: %v", err)
-			names = map[string]string{}
-		}
-
+		// Stop bound applies to every item on the page regardless of
+		// already-downloaded status, so it has to be checked before
+		// filtering down to newItems.
 		stop := false
+		var newItems []libraryItem
 		for _, it := range items {
 			if it.TimestampMS < afterTS {
 				stop = true
 				break // items are newest-first; once we're past "after", we're done
 			}
-			fn := claimFilename(destDir, names[it.MediaKey], usedNames)
-			log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
-			if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
-				log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
-				skipped++
+			if idx.has(it.MediaKey) {
+				alreadyHave++
 				continue
 			}
-			total++
+			newItems = append(newItems, it)
 		}
+
+		if len(newItems) > 0 {
+			// keys, batched, for filename resolution — only for items we
+			// don't already have, so a mostly-synced re-run doesn't spend an
+			// RPC resolving filenames it's just going to skip.
+			keys := make([]string, len(newItems))
+			for i, it := range newItems {
+				keys[i] = it.MediaKey
+			}
+			names, err := batchFilenames(ctx, client, gd, keys)
+			if err != nil {
+				log.Printf("gphotos: filename lookup failed, falling back to media_key: %v", err)
+				names = map[string]string{}
+			}
+
+			for _, it := range newItems {
+				fn := claimFilename(destDir, names[it.MediaKey], usedNames)
+				log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
+				if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
+					log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
+					skipped++
+					continue
+				}
+				idx.record(it.MediaKey, fn, it.TimestampMS)
+				total++
+			}
+		}
+
+		// Save after every page (not just at the end) so a run interrupted
+		// partway through doesn't lose credit for what it already
+		// downloaded and re-fetch it next time.
+		if err := idx.save(); err != nil {
+			log.Printf("gphotos: saving download index: %v", err)
+		}
+
 		if stop || next == nil {
 			break
 		}
@@ -523,6 +623,6 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 		startTS = nil // only the first page needs the explicit start timestamp
 	}
 
-	log.Printf("gphotos: done: %d downloaded, %d skipped", total, skipped)
+	log.Printf("gphotos: done: %d downloaded, %d already had, %d skipped", total, alreadyHave, skipped)
 	return nil
 }
