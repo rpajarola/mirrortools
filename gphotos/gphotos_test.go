@@ -156,6 +156,40 @@ func TestRemoveStaleTempFiles(t *testing.T) {
 	}
 }
 
+func TestParseLast(t *testing.T) {
+	ref := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		last string
+		want time.Time
+	}{
+		{"30d", ref.AddDate(0, 0, -30)},
+		{"2w", ref.AddDate(0, 0, -14)},
+		// AddDate(0,-1,0) on Mar 31 lands on "Feb 31", which Go normalizes by
+		// overflowing into March (Feb 2026 has 28 days) rather than clamping.
+		{"1m", time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)},
+		{"1y", time.Date(2025, 3, 31, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, c := range cases {
+		got, err := parseLast(c.last, ref)
+		if err != nil {
+			t.Errorf("parseLast(%q): %v", c.last, err)
+			continue
+		}
+		if !got.Equal(c.want) {
+			t.Errorf("parseLast(%q) = %v, want %v", c.last, got, c.want)
+		}
+	}
+}
+
+func TestParseLastInvalid(t *testing.T) {
+	for _, bad := range []string{"", "30", "d", "30x", "-5d", "1.5m"} {
+		if _, err := parseLast(bad, time.Now()); err == nil {
+			t.Errorf("parseLast(%q): expected error", bad)
+		}
+	}
+}
+
 func TestDownloadIndexRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 

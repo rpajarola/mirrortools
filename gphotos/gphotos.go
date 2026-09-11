@@ -13,6 +13,7 @@
 // package, so it's normally driven through the mirror CLI:
 //
 //	mirror gphotos -cookies cookies.txt -after 2026-09-06 someone@gmail.com ./photos
+//	mirror gphotos -cookies cookies.txt -last 30d someone@gmail.com ./photos
 package gphotos
 
 import (
@@ -30,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,11 +48,62 @@ func init() {
 			cookiesPath := fs.String("cookies", "cookies.txt", "Netscape cookies.txt exported after logging into photos.google.com")
 			after := fs.String("after", "", "only download items taken on/after this date, YYYY-MM-DD (default: no lower bound)")
 			before := fs.String("before", "", "only download items taken on/before this date, YYYY-MM-DD (default: now)")
+			last := fs.String("last", "", "only download items taken in the last duration, e.g. 30d, 2w, 6m, 1y "+
+				"(an alternative to -after, relative to -before or now; mutually exclusive with -after)")
 			return func(ctx context.Context, source, destDir string) error {
-				return Mirror(ctx, source, destDir, *cookiesPath, *after, *before)
+				effectiveAfter := *after
+				if *last != "" {
+					if *after != "" {
+						return fmt.Errorf("-last and -after are mutually exclusive")
+					}
+					ref := time.Now()
+					if *before != "" {
+						t, err := time.Parse("2006-01-02", *before)
+						if err != nil {
+							return fmt.Errorf("bad -before date: %w", err)
+						}
+						ref = t
+					}
+					afterT, err := parseLast(*last, ref)
+					if err != nil {
+						return err
+					}
+					effectiveAfter = afterT.Format("2006-01-02")
+				}
+				return Mirror(ctx, source, destDir, *cookiesPath, effectiveAfter, *before)
 			}
 		},
 	})
+}
+
+var lastRe = regexp.MustCompile(`^(\d+)([dwmy])$`)
+
+// parseLast parses a relative range like "30d", "2w", "6m", "1y" into the
+// time that many days/weeks/months/years before ref. Weeks are exactly 7
+// days; months and years use calendar-aware time.Time.AddDate (so "1m"
+// before March 31 lands on the right day for whatever month that is, rather
+// than a fixed 30-day approximation).
+func parseLast(last string, ref time.Time) (time.Time, error) {
+	m := lastRe.FindStringSubmatch(last)
+	if m == nil {
+		return time.Time{}, fmt.Errorf("invalid -last %q: want a number followed by d, w, m, or y (e.g. 30d, 2w, 6m, 1y)", last)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid -last %q: %w", last, err)
+	}
+	switch m[2] {
+	case "d":
+		return ref.AddDate(0, 0, -n), nil
+	case "w":
+		return ref.AddDate(0, 0, -7*n), nil
+	case "m":
+		return ref.AddDate(0, -n, 0), nil
+	case "y":
+		return ref.AddDate(-n, 0, 0), nil
+	default:
+		return time.Time{}, fmt.Errorf("invalid -last %q: unknown unit %q", last, m[2])
+	}
 }
 
 // ---- global session data, scraped once from the photos.google.com HTML ----
