@@ -28,30 +28,53 @@ func TestParseBatchFilenamesBadShape(t *testing.T) {
 	}
 }
 
-func TestClaimFilenameCollisions(t *testing.T) {
+func TestResolveFilenameFreeName(t *testing.T) {
 	dir := t.TempDir()
-	used := map[string]bool{}
-
-	a := claimFilename(dir, "IMG_0001.jpg", used)
-	if a != "IMG_0001.jpg" {
-		t.Fatalf("first claim: got %q", a)
+	name, adopted := resolveFilename(dir, "IMG_0001.jpg", "mk1", map[string]bool{})
+	if name != "IMG_0001.jpg" || adopted {
+		t.Fatalf("got %q, adopted=%v", name, adopted)
 	}
-	if err := os.WriteFile(filepath.Join(dir, a), []byte("x"), 0o644); err != nil {
+}
+
+func TestResolveFilenameEmptyNameFallsBackToMediaKey(t *testing.T) {
+	dir := t.TempDir()
+	name, adopted := resolveFilename(dir, "", "mk1", map[string]bool{})
+	if name != "mk1" || adopted {
+		t.Fatalf("got %q, adopted=%v", name, adopted)
+	}
+}
+
+func TestResolveFilenameAdoptsUnknownExistingFile(t *testing.T) {
+	// A file already on disk that nothing (this run or the index) has
+	// claimed yet is assumed to be this same item from before the index
+	// existed — e.g. exactly what happens the first run after adding the
+	// index to a directory a pre-index run already populated.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "IMG_0001.jpg"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	name, adopted := resolveFilename(dir, "IMG_0001.jpg", "mk1", map[string]bool{})
+	if name != "IMG_0001.jpg" || !adopted {
+		t.Fatalf("got %q, adopted=%v, want adopted", name, adopted)
+	}
+}
 
-	// Same name claimed again within the same run must not collide with the
-	// first claim, or with the file it wrote to disk.
-	b := claimFilename(dir, "IMG_0001.jpg", used)
-	if b != "IMG_0001-2.jpg" {
-		t.Fatalf("second claim (in-run collision): got %q", b)
+func TestResolveFilenameDisambiguatesKnownCollision(t *testing.T) {
+	// A name already in `used` (claimed by a different, already-known item
+	// — from the index or earlier this run) is a genuine collision between
+	// two distinct items and must never be silently adopted or overwritten.
+	dir := t.TempDir()
+	used := map[string]bool{"IMG_0001.jpg": true} // claimed by some other media key
+
+	name, adopted := resolveFilename(dir, "IMG_0001.jpg", "mk2", used)
+	if name != "IMG_0001-2.jpg" || adopted {
+		t.Fatalf("got %q, adopted=%v", name, adopted)
 	}
 
-	// A file already on disk from a prior run must also never be silently
-	// overwritten, even with a fresh `used` map.
-	c := claimFilename(dir, "IMG_0001.jpg", map[string]bool{})
-	if c == "IMG_0001.jpg" {
-		t.Fatalf("would overwrite existing file: got %q", c)
+	// A second distinct item wanting the same name gets the next suffix.
+	name2, adopted2 := resolveFilename(dir, "IMG_0001.jpg", "mk3", used)
+	if name2 != "IMG_0001-3.jpg" || adopted2 {
+		t.Fatalf("got %q, adopted=%v", name2, adopted2)
 	}
 }
 

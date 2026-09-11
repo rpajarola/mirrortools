@@ -367,20 +367,34 @@ func loadCookiesFromNetscapeFile(jar *cookiejar.Jar, path string) error {
 
 // ---- download ----
 
-// claimFilename returns a name for item, based on Google's own filename for
-// it (name, which may be empty if the lookup failed or the item has none),
-// that's guaranteed not to collide with anything already on disk in destDir
-// or already claimed earlier in this run. used tracks names claimed so far
-// this run; the caller owns it and should pass the same map for every item.
+// resolveFilename decides the local filename for an item, based on Google's
+// own filename for it (name, which may be empty if the lookup failed or the
+// item has none), and reports whether that file is already sitting in
+// destDir from before.
 //
-// Google filenames like "IMG_0001.jpg" or "DSC_0001.jpg" collide constantly
-// across different devices/import sessions, and a mirror tool overwriting a
-// previously-downloaded photo because a later, unrelated one happens to
-// share its name would be silent data loss. So on any collision this always
-// appends a numeric suffix rather than ever overwriting an existing file.
-func claimFilename(destDir, name string, used map[string]bool) string {
+// used tracks names already spoken for this run: both ones claimed earlier
+// in this same run, and (seeded by the caller) ones already recorded for
+// some other media key in the download index. The caller must pass the same
+// map for every item.
+//
+//   - If the resulting name isn't in used and nothing exists at
+//     destDir/name, it's free: claim it, alreadyOnDisk is false.
+//   - If nothing exists at destDir/name but candidate IS in used, that name
+//     provably belongs to a different, already-known item (either indexed
+//     from a past run, or being downloaded earlier THIS run) — Google
+//     filenames like "IMG_0001.jpg" collide constantly across devices, and
+//     silently overwriting a previously-mirrored photo because an unrelated
+//     one shares its name would be data loss. Append a numeric suffix and
+//     try again rather than ever overwriting.
+//   - If a file already exists at destDir/name and candidate is NOT in
+//     used, nothing currently known claims it, so it's assumed to be this
+//     same item's own file from a previous run — e.g. downloaded before the
+//     local index existed, or after the index was lost. Adopt it:
+//     alreadyOnDisk is true, and the caller should record it without
+//     re-downloading rather than fetching a redundant "-2" copy of itself.
+func resolveFilename(destDir, name, mediaKey string, used map[string]bool) (final string, alreadyOnDisk bool) {
 	if name == "" {
-		return name
+		name = mediaKey
 	}
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
@@ -388,21 +402,21 @@ func claimFilename(destDir, name string, used map[string]bool) string {
 	for i := 2; ; i++ {
 		if !used[candidate] {
 			if _, err := os.Stat(filepath.Join(destDir, candidate)); os.IsNotExist(err) {
+				alreadyOnDisk = false
 				break
 			}
+			alreadyOnDisk = true
+			break
 		}
 		candidate = fmt.Sprintf("%s-%d%s", base, i, ext)
 	}
 	used[candidate] = true
-	return candidate
+	return candidate, alreadyOnDisk
 }
 
 func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, filename, destDir string) error {
 	if item.BaseURL == "" {
 		return fmt.Errorf("no base url for %s", item.MediaKey)
-	}
-	if filename == "" {
-		filename = item.MediaKey
 	}
 	// "=d" = original quality photo bytes. Videos need "=dv"; distinguishing
 	// them reliably requires the item's feature-map (see parser.py in gpwc —
@@ -550,8 +564,15 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	afterTS := afterT.UnixMilli()
 
 	var pageID *string
-	total, alreadyHave, skipped := 0, 0, 0
-	usedNames := map[string]bool{} // claimed filenames this run, for claimFilename
+	total, adopted, alreadyHave, skipped := 0, 0, 0, 0
+	// Seeded with every filename the index already knows about, so
+	// resolveFilename can tell "this name belongs to some other,
+	// already-known item" (needs disambiguating) apart from "nothing knows
+	// about this name yet, but it's on disk" (adopt it as this item's own).
+	usedNames := map[string]bool{}
+	for _, e := range idx.entries {
+		usedNames[e.Filename] = true
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -597,7 +618,13 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 			}
 
 			for _, it := range newItems {
-				fn := claimFilename(destDir, names[it.MediaKey], usedNames)
+				fn, alreadyOnDisk := resolveFilename(destDir, names[it.MediaKey], it.MediaKey, usedNames)
+				if alreadyOnDisk {
+					log.Printf("gphotos: adopting existing %s into index (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
+					idx.record(it.MediaKey, fn, it.TimestampMS)
+					adopted++
+					continue
+				}
 				log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
 				if err := downloadOriginal(ctx, client, it, fn, destDir); err != nil {
 					log.Printf("gphotos:   skip %s: %v", it.MediaKey, err)
@@ -623,6 +650,6 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 		startTS = nil // only the first page needs the explicit start timestamp
 	}
 
-	log.Printf("gphotos: done: %d downloaded, %d already had, %d skipped", total, alreadyHave, skipped)
+	log.Printf("gphotos: done: %d downloaded, %d adopted from disk, %d already had, %d skipped", total, adopted, alreadyHave, skipped)
 	return nil
 }
