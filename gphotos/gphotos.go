@@ -18,6 +18,7 @@ package gphotos
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -50,6 +51,10 @@ func init() {
 			before := fs.String("before", "", "only download items taken on/before this date, YYYY-MM-DD (default: now)")
 			last := fs.String("last", "", "only download items taken in the last duration, e.g. 30d, 2w, 6m, 1y "+
 				"(an alternative to -after, relative to -before or now; mutually exclusive with -after)")
+			companions := fs.Bool("companions", false, "also fetch each item's RAW/DNG companion, for a Pixel RAW+JPEG "+
+				"capture pair (filenames like PXL_..._RAW-01.COVER.jpg) — via Google's undocumented per-group lookup, "+
+				"confirmed against real captured traffic but only exercised against one account so far. A bad response "+
+				"is always safely detected and skipped rather than saved. Off by default")
 			return func(ctx context.Context, source, destDir string) error {
 				effectiveAfter := *after
 				if *last != "" {
@@ -70,7 +75,7 @@ func init() {
 					}
 					effectiveAfter = afterT.Format("2006-01-02")
 				}
-				return Mirror(ctx, source, destDir, *cookiesPath, effectiveAfter, *before)
+				return Mirror(ctx, source, destDir, *cookiesPath, effectiveAfter, *before, *companions)
 			}
 		},
 	})
@@ -237,6 +242,32 @@ type libraryItem struct {
 	DedupKey    string
 }
 
+// parseLibraryItems decodes a list of items in the common shape shared by
+// lcxiM (library listing) and wgZjtc (RAW-group lookup): each item is
+// [media_key, [base_url, width, height, ...], timestamp_ms, dedup_key, ...].
+func parseLibraryItems(rawItems []json.RawMessage) []libraryItem {
+	items := make([]libraryItem, 0, len(rawItems))
+	for _, ri := range rawItems {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(ri, &arr); err != nil || len(arr) < 4 {
+			continue
+		}
+		var mediaKey, dedupKey string
+		var thumb []json.RawMessage
+		var ts int64
+		json.Unmarshal(arr[0], &mediaKey)
+		json.Unmarshal(arr[1], &thumb)
+		json.Unmarshal(arr[2], &ts)
+		json.Unmarshal(arr[3], &dedupKey)
+		baseURL := ""
+		if len(thumb) > 0 {
+			json.Unmarshal(thumb[0], &baseURL)
+		}
+		items = append(items, libraryItem{MediaKey: mediaKey, BaseURL: baseURL, TimestampMS: ts, DedupKey: dedupKey})
+	}
+	return items
+}
+
 // listPage fetches one page starting at startTS (epoch ms, nil = most recent).
 // Google returns items newest-first, so paging with a starting timestamp is
 // how you jump into an arbitrary date range instead of walking the whole lib.
@@ -254,24 +285,7 @@ func listPage(ctx context.Context, c *http.Client, gd *globalData, startTS *int6
 	if len(page) > 0 && string(page[0]) != "null" {
 		var rawItems []json.RawMessage
 		json.Unmarshal(page[0], &rawItems)
-		for _, ri := range rawItems {
-			var arr []json.RawMessage
-			if err := json.Unmarshal(ri, &arr); err != nil || len(arr) < 4 {
-				continue
-			}
-			var mediaKey, dedupKey string
-			var thumb []json.RawMessage
-			var ts int64
-			json.Unmarshal(arr[0], &mediaKey)
-			json.Unmarshal(arr[1], &thumb)
-			json.Unmarshal(arr[2], &ts)
-			json.Unmarshal(arr[3], &dedupKey)
-			baseURL := ""
-			if len(thumb) > 0 {
-				json.Unmarshal(thumb[0], &baseURL)
-			}
-			items = append(items, libraryItem{MediaKey: mediaKey, BaseURL: baseURL, TimestampMS: ts, DedupKey: dedupKey})
-		}
+		items = parseLibraryItems(rawItems)
 	}
 	if len(page) > 1 && string(page[1]) != "null" {
 		var np string
@@ -467,9 +481,9 @@ func resolveFilename(destDir, name, mediaKey string, used map[string]bool) (fina
 	return candidate, alreadyOnDisk
 }
 
-// tmpSuffix marks a file as a download in progress. downloadOriginal never
+// tmpSuffix marks a file as a download in progress. writeAtomically never
 // lets a file under this name be mistaken for a finished one: it writes
-// here first and only renames to the real filename after io.Copy returns
+// here first and only renames to the real filename after the copy finishes
 // successfully, so a download cut short — network failure, or the process
 // getting killed outright (ctrl-C doesn't run deferred Close()s) — leaves
 // only a "*.gphotos-tmp" behind, never a truncated file at the real name
@@ -480,13 +494,15 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 	if item.BaseURL == "" {
 		return fmt.Errorf("no base url for %s", item.MediaKey)
 	}
-	finalPath := filepath.Join(destDir, filename)
-	tmpPath := finalPath + tmpSuffix
-
 	// "=d" = original quality photo bytes. Videos need "=dv"; distinguishing
 	// them reliably requires the item's feature-map (see parser.py in gpwc —
 	// LibraryItem.video_duration) which this minimal port skips. As a cheap
 	// fallback, retry with =dv if =d comes back as a non-media content type.
+	//
+	// Note this only ever returns the cover file. A Pixel RAW+JPEG pair's
+	// RAW/DNG companion isn't reachable this way at all — see
+	// downloadCompanions, which Mirror calls separately (additively, not as
+	// a replacement for this) when -companions is on.
 	for _, suffix := range []string{"=d", "=dv"} {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.BaseURL+suffix, nil)
 		if err != nil {
@@ -498,17 +514,27 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 		}
 		ct := resp.Header.Get("Content-Type")
 		if resp.StatusCode == 200 && (strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")) {
-			err := writeBody(tmpPath, resp.Body)
+			err := writeAtomically(destDir, filename, resp.Body)
 			resp.Body.Close()
-			if err != nil {
-				os.Remove(tmpPath)
-				return err
-			}
-			return os.Rename(tmpPath, finalPath)
+			return err
 		}
 		resp.Body.Close()
 	}
 	return fmt.Errorf("could not fetch original bytes for %s", item.MediaKey)
+}
+
+// writeAtomically writes r to destDir/filename via the tmpSuffix
+// write-then-rename dance (see tmpSuffix's doc comment), so any partial
+// write — network failure, cancellation, the process getting killed
+// outright — never leaves a truncated file at the real name.
+func writeAtomically(destDir, filename string, r io.Reader) error {
+	finalPath := filepath.Join(destDir, filename)
+	tmpPath := finalPath + tmpSuffix
+	if err := writeBody(tmpPath, r); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, finalPath)
 }
 
 func writeBody(path string, r io.Reader) error {
@@ -519,6 +545,149 @@ func writeBody(path string, r io.Reader) error {
 	defer out.Close()
 	_, err = io.Copy(out, r)
 	return err
+}
+
+// ---- RAW/DNG companions: Pixel RAW+JPEG capture groups (wgZjtc) ----
+//
+// A Pixel phone shooting RAW+JPEG saves two files sharing one timestamp
+// "group ID" — e.g. "PXL_20260911_103945315.RAW-01.COVER.jpg" and
+// "PXL_20260911_103945315.RAW-02.ORIGINAL.dng" both share the group ID
+// "20260911_103945315". Only the JPEG "cover" is returned by the regular
+// library listing (lcxiM); the RAW file has its own media key and base URL
+// but isn't a top-level library item. wgZjtc, given the group ID, returns
+// every file in the group — confirmed against real captured traffic. This
+// replaces an earlier attempt that used Google's multi-select "download
+// all" bundle-as-zip flow (yCLA7/dnv2s): that flow turned out to be for
+// bundling multiple, possibly unrelated selected items, not for resolving
+// one item's own RAW companion, and its download URLs always redirected to
+// a Google sign-in page when fetched this way.
+//
+// This is scoped to the "PXL_...RAW-01(.MP)?.COVER..." filename Pixel
+// itself uses; a RAW+JPEG pair from other camera brands, if named
+// differently, won't be recognized.
+var rawCoverRe = regexp.MustCompile(`(?i)^PXL_(\d{8}_\d+)\.RAW-01(?:\.MP)?\.COVER\.`)
+
+// getRawGroup resolves every file (cover and companions) in the RAW+JPEG
+// capture group identified by groupID (see rawCoverRe).
+func getRawGroup(ctx context.Context, c *http.Client, gd *globalData, groupID string) ([]libraryItem, error) {
+	raw, err := callRPC(ctx, c, gd, "wgZjtc", []any{groupID, nil, 1, 1})
+	if err != nil {
+		return nil, err
+	}
+	return parseRawGroup(raw)
+}
+
+// parseRawGroup extracts the member items from a wgZjtc response: raw[2] is
+// the item list, in the same per-item shape parseLibraryItems already
+// handles for lcxiM.
+func parseRawGroup(raw json.RawMessage) ([]libraryItem, error) {
+	var top []json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil || len(top) < 3 {
+		return nil, fmt.Errorf("unexpected wgZjtc response shape: %s", raw)
+	}
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(top[2], &rawItems); err != nil {
+		return nil, fmt.Errorf("unexpected wgZjtc response shape: %s", raw)
+	}
+	return parseLibraryItems(rawItems), nil
+}
+
+// looksLikeHTML reports whether body looks like it starts with an HTML
+// document rather than binary file content.
+func looksLikeHTML(body []byte) bool {
+	head := bytes.TrimSpace(body)
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	head = bytes.ToLower(head)
+	return bytes.HasPrefix(head, []byte("<!doctype")) || bytes.HasPrefix(head, []byte("<html"))
+}
+
+// fetchRawCompanionOriginal fetches the true original bytes for a RAW/DNG
+// companion item directly from its own base URL, using suffix "=s0-d-I" —
+// confirmed against captured traffic to return the actual stored file.
+// downloadOriginal's "=d"/"=dv" is Google's normal preview/render suffix
+// and, for a RAW item, isn't known to return the literal RAW bytes, so this
+// doesn't reuse it. A DNG response comes back as application/octet-stream
+// rather than image/*, so this also doesn't reuse downloadOriginal's
+// image/video content-type whitelist — instead it relies on looksLikeHTML,
+// same as everywhere else in this file, to catch an auth redirect rather
+// than a real file.
+func fetchRawCompanionOriginal(ctx context.Context, c *http.Client, item libraryItem, filename, destDir string) error {
+	if item.BaseURL == "" {
+		return fmt.Errorf("no base url for %s", item.MediaKey)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.BaseURL+"=s0-d-I", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Referer", "https://photos.google.com/")
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("companion download returned status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if looksLikeHTML(body) {
+		return fmt.Errorf("companion download returned an HTML page instead of file bytes (likely an auth redirect), content-type %q", resp.Header.Get("Content-Type"))
+	}
+	return writeAtomically(destDir, filename, bytes.NewReader(body))
+}
+
+// downloadCompanions looks for a RAW/DNG companion of item — a Pixel
+// RAW+JPEG pair's "cover" JPEG, identified by coverFilename matching
+// rawCoverRe — and downloads every companion found. used is the same
+// filename-collision map Mirror's loop already threads through
+// resolveFilename. Returns the companion filenames written, so the caller
+// can record them alongside the cover in the index; nil, nil if item isn't
+// part of a recognized RAW+JPEG group.
+func downloadCompanions(ctx context.Context, c *http.Client, gd *globalData, item libraryItem, coverFilename, destDir string, used map[string]bool) ([]string, error) {
+	m := rawCoverRe.FindStringSubmatch(coverFilename)
+	if m == nil {
+		return nil, nil
+	}
+	groupID := m[1]
+
+	siblings, err := getRawGroup(ctx, c, gd, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("resolving RAW group %s: %w", groupID, err)
+	}
+	var companions []libraryItem
+	for _, s := range siblings {
+		if s.MediaKey != item.MediaKey {
+			companions = append(companions, s)
+		}
+	}
+	if len(companions) == 0 {
+		return nil, nil
+	}
+
+	keys := make([]string, len(companions))
+	for i, s := range companions {
+		keys[i] = s.MediaKey
+	}
+	names, err := batchFilenames(ctx, c, gd, keys)
+	if err != nil {
+		return nil, fmt.Errorf("resolving companion filenames: %w", err)
+	}
+
+	written := make([]string, 0, len(companions))
+	for _, s := range companions {
+		fn, alreadyOnDisk := resolveFilename(destDir, names[s.MediaKey], s.MediaKey, used)
+		if !alreadyOnDisk {
+			if err := fetchRawCompanionOriginal(ctx, c, s, fn, destDir); err != nil {
+				return written, fmt.Errorf("downloading companion %s: %w", s.MediaKey, err)
+			}
+		}
+		written = append(written, fn)
+	}
+	return written, nil
 }
 
 // removeStaleTempFiles deletes any leftover "*.gphotos-tmp" files in
@@ -551,7 +720,7 @@ const indexFileName = ".gphotos-index.json"
 // downloadIndex records, per Google Photos media key, that an item has
 // already been downloaded into destDir — so a later run can skip it instead
 // of re-fetching. It's keyed by MediaKey rather than filename since
-// claimFilename may rename an item to avoid a collision.
+// resolveFilename may rename an item to avoid a collision.
 //
 // The index is the source of truth for "already downloaded", not the
 // filesystem: a run never re-checks whether the recorded file is still on
@@ -563,9 +732,23 @@ type downloadIndex struct {
 	entries map[string]indexEntry
 }
 
+// An item normally downloads as a single file, recorded in Filename alone.
+// One with a RAW/DNG companion (see downloadCompanions) additionally
+// populates ExtraFilenames, so both files are tracked under the cover
+// item's one media key and both stay protected from future name collisions
+// (see Mirror's usedNames seeding).
 type indexEntry struct {
-	Filename    string `json:"filename"`
-	TimestampMS int64  `json:"timestamp_ms"`
+	Filename       string   `json:"filename"`
+	ExtraFilenames []string `json:"extra_filenames,omitempty"`
+	TimestampMS    int64    `json:"timestamp_ms"`
+}
+
+// filenames returns every file this entry recorded, primary first.
+func (e indexEntry) filenames() []string {
+	if e.Filename == "" {
+		return nil
+	}
+	return append([]string{e.Filename}, e.ExtraFilenames...)
 }
 
 func loadDownloadIndex(destDir string) (*downloadIndex, error) {
@@ -588,8 +771,14 @@ func (idx *downloadIndex) has(mediaKey string) bool {
 	return ok
 }
 
-func (idx *downloadIndex) record(mediaKey, filename string, timestampMS int64) {
-	idx.entries[mediaKey] = indexEntry{Filename: filename, TimestampMS: timestampMS}
+// record stores every filename an item downloaded as, primary first.
+func (idx *downloadIndex) record(mediaKey string, filenames []string, timestampMS int64) {
+	e := indexEntry{TimestampMS: timestampMS}
+	if len(filenames) > 0 {
+		e.Filename = filenames[0]
+		e.ExtraFilenames = filenames[1:]
+	}
+	idx.entries[mediaKey] = e
 }
 
 // save writes the index atomically (write-then-rename) so a process killed
@@ -617,7 +806,12 @@ func (idx *downloadIndex) save() error {
 // after and before are YYYY-MM-DD date strings restricting which items (by
 // taken date) get downloaded; either may be empty, meaning no lower bound
 // (after) or up to now (before).
-func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before string) error {
+//
+// tryCompanions, if true, additionally looks for each item's RAW/DNG
+// companion (see downloadCompanions) after downloading it normally. Off by
+// default: it's confirmed against real captured traffic but only exercised
+// against one account so far.
+func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before string, tryCompanions bool) error {
 	var afterT time.Time
 	if after != "" {
 		t, err := time.Parse("2006-01-02", after)
@@ -668,7 +862,9 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	// about this name yet, but it's on disk" (adopt it as this item's own).
 	usedNames := map[string]bool{}
 	for _, e := range idx.entries {
-		usedNames[e.Filename] = true
+		for _, fn := range e.filenames() {
+			usedNames[fn] = true
+		}
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -718,7 +914,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 				fn, alreadyOnDisk := resolveFilename(destDir, names[it.MediaKey], it.MediaKey, usedNames)
 				if alreadyOnDisk {
 					log.Printf("gphotos: adopting existing %s into index (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
-					idx.record(it.MediaKey, fn, it.TimestampMS)
+					idx.record(it.MediaKey, []string{fn}, it.TimestampMS)
 					adopted++
 				} else {
 					log.Printf("gphotos: downloading %s (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
@@ -727,7 +923,17 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 						skipped++
 						continue
 					}
-					idx.record(it.MediaKey, fn, it.TimestampMS)
+					filenames := []string{fn}
+					if tryCompanions {
+						extra, err := downloadCompanions(ctx, client, gd, it, fn, destDir, usedNames)
+						if err != nil {
+							log.Printf("gphotos:   companion lookup failed for %s: %v", it.MediaKey, err)
+						} else if len(extra) > 0 {
+							log.Printf("gphotos:   %s came with %d companion file(s): %v", it.MediaKey, len(extra), extra)
+							filenames = append(filenames, extra...)
+						}
+					}
+					idx.record(it.MediaKey, filenames, it.TimestampMS)
 					total++
 				}
 
