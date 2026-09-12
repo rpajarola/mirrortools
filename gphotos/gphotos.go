@@ -51,10 +51,9 @@ func init() {
 			before := fs.String("before", "", "only download items taken on/before this date, YYYY-MM-DD (default: now)")
 			last := fs.String("last", "", "only download items taken in the last duration, e.g. 30d, 2w, 6m, 1y "+
 				"(an alternative to -after, relative to -before or now; mutually exclusive with -after)")
-			companions := fs.Bool("companions", false, "also fetch each item's RAW/DNG companion, for a Pixel RAW+JPEG "+
-				"capture pair (filenames like PXL_..._RAW-01.COVER.jpg) — via Google's undocumented per-group lookup, "+
-				"confirmed against real captured traffic but only exercised against one account so far. A bad response "+
-				"is always safely detected and skipped rather than saved. Off by default")
+			companions := fs.Bool("companions", true, "also fetch each item's RAW/DNG companion, for a Pixel RAW+JPEG "+
+				"capture pair (filenames like PXL_..._RAW-01.COVER.jpg) — via Google's undocumented per-group lookup. "+
+				"A bad response is always safely detected and skipped rather than saved. On by default; pass -companions=false to disable")
 			return func(ctx context.Context, source, destDir string) error {
 				effectiveAfter := *after
 				if *last != "" {
@@ -808,9 +807,8 @@ func (idx *downloadIndex) save() error {
 // (after) or up to now (before).
 //
 // tryCompanions, if true, additionally looks for each item's RAW/DNG
-// companion (see downloadCompanions) after downloading it normally. Off by
-// default: it's confirmed against real captured traffic but only exercised
-// against one account so far.
+// companion (see downloadCompanions) after downloading it normally. On by
+// default, confirmed working against a real account.
 func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before string, tryCompanions bool) error {
 	var afterT time.Time
 	if after != "" {
