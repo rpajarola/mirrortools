@@ -25,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -137,6 +138,12 @@ func fetchGlobalData(ctx context.Context, c *http.Client) (*globalData, error) {
 	}
 	m := globalDataRe.FindSubmatch(body)
 	if m == nil {
+		// Whatever page this actually is — a sign-in form, an account
+		// chooser, a consent interstitial — its URL and a snippet of its
+		// body says a lot more than "not found" about why: were we bounced
+		// off photos.google.com entirely, and to where.
+		log.Printf("gphotos: WIZ_global_data not found: http %d, landed on %s, body: %s",
+			resp.StatusCode, resp.Request.URL, snippet(body, 300))
 		return nil, fmt.Errorf("WIZ_global_data not found — cookies likely invalid/expired, re-export them")
 	}
 	var raw map[string]json.RawMessage
@@ -156,6 +163,129 @@ func fetchGlobalData(ctx context.Context, c *http.Client) (*globalData, error) {
 		At:     get("SNlM0e"),
 		ImPath: get("Im6cmf"),
 	}, nil
+}
+
+// ---- keeping a long-running session's cookies alive ----
+//
+// Google issues two kinds of cookies for photos.google.com (and every other
+// first-party Google web app): long-lived account cookies (SID, HSID,
+// SAPISID, __Secure-1PSID, ...) good for weeks, and a short-lived rotating
+// session token (__Secure-1PSIDTS / __Secure-3PSIDTS) that a real browser
+// silently refreshes every so often via a background request while the tab
+// stays open. A cookies.txt export only captures a snapshot, so that
+// rotating token starts going stale within minutes of export — that's
+// almost certainly what "cookies expire after a few minutes" describes.
+// Since this process doesn't run the page's JS, nothing refreshes it on its
+// own; without doing this explicitly, a long mirror run's requests would
+// just start failing partway through once the exported token ages out. The
+// XSRF "at" token in globalData is tied to the same page-load session, so
+// it's refreshed alongside it.
+//
+// The rotation endpoint itself (POST accounts.google.com/RotateCookies)
+// is confirmed working — for a different Google product's web app
+// (Gemini), by an actively maintained reverse-engineered client
+// (github.com/HanaokaYuzu/Gemini-API) — not verified here against
+// photos.google.com specifically. It lives on accounts.google.com, Google's
+// shared identity domain rather than a product-specific one, which is why
+// it's expected to refresh the session cookies for any first-party Google
+// property, not just Gemini's. Failure here is graceful either way: it only
+// refreshes cookies already in the jar and never touches downloaded
+// content, so a wrong guess just means the session keeps aging on its
+// existing cookies rather than corrupting anything — Mirror logs a warning
+// and carries on with whatever session it already has.
+const (
+	rotateCookiesURL       = "https://accounts.google.com/RotateCookies"
+	sessionRefreshInterval = 2 * time.Minute
+)
+
+// cookieWatchList is logged (fingerprints only, never full values) at key
+// points — after the initial cookies.txt load and around every rotation —
+// to help diagnose session problems from the log alone: are the long-lived
+// account cookies even present, and does rotateCookies actually change the
+// short-lived ones.
+var cookieWatchList = []string{"SID", "__Secure-1PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS", "SAPISID"}
+
+// cookieValue returns the named cookie's current value for host from c's
+// jar, or "" if absent.
+func cookieValue(c *http.Client, host, name string) string {
+	if c.Jar == nil {
+		return ""
+	}
+	for _, ck := range c.Jar.Cookies(&url.URL{Scheme: "https", Host: host}) {
+		if ck.Name == name {
+			return ck.Value
+		}
+	}
+	return ""
+}
+
+// fingerprint summarizes a cookie value for logging without exposing
+// anything an attacker could replay: presence and length, plus a few
+// trailing characters as a change-detector (so two log lines can show
+// "still the same value" vs. "this rotated") without logging enough to
+// reconstruct the cookie.
+func fingerprint(v string) string {
+	if v == "" {
+		return "<absent>"
+	}
+	tail := v
+	if len(tail) > 6 {
+		tail = tail[len(tail)-6:]
+	}
+	return fmt.Sprintf("<len=%d ...%s>", len(v), tail)
+}
+
+// logCookieStatus logs a fingerprint of every cookie in cookieWatchList,
+// for host "google.com" (a domain cookie there covers photos.google.com,
+// accounts.google.com, etc. — see loadCookiesFromNetscapeFile).
+func logCookieStatus(c *http.Client, label string) {
+	parts := make([]string, len(cookieWatchList))
+	for i, name := range cookieWatchList {
+		parts[i] = name + "=" + fingerprint(cookieValue(c, "google.com", name))
+	}
+	log.Printf("gphotos: %s: %s", label, strings.Join(parts, " "))
+}
+
+// rotateCookies asks Google to refresh the short-lived session cookies in
+// c's jar. The request body is the literal payload the reference
+// implementation above sends; its meaning isn't documented anywhere public.
+func rotateCookies(ctx context.Context, c *http.Client, url string) error {
+	before := fingerprint(cookieValue(c, "google.com", "__Secure-1PSIDTS"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(`[000,"-0000000000000000000"]`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://accounts.google.com")
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	after := fingerprint(cookieValue(c, "google.com", "__Secure-1PSIDTS"))
+	log.Printf("gphotos: rotate cookies: http %d, __Secure-1PSIDTS before=%s after=%s, response body=%s",
+		resp.StatusCode, before, after, snippet(body, 300))
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("session fully expired (401) — re-export cookies.txt")
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// refreshSession rotates the session cookie and re-fetches globalData (for
+// a fresh XSRF "at" token) so a long-running Mirror doesn't start failing
+// partway through. Call no more than once every sessionRefreshInterval —
+// Google's rotation endpoint 429s if hit too often.
+func refreshSession(ctx context.Context, c *http.Client) (*globalData, error) {
+	if err := rotateCookies(ctx, c, rotateCookiesURL); err != nil {
+		return nil, fmt.Errorf("rotating cookies: %w", err)
+	}
+	gd, err := fetchGlobalData(ctx, c)
+	logCookieStatus(c, "cookies after session refresh")
+	return gd, err
 }
 
 // ---- batchexecute transport ----
@@ -197,7 +327,30 @@ func callRPC(ctx context.Context, c *http.Client, gd *globalData, rpcid string, 
 		return nil, err
 	}
 
-	return parseWrbFr(body, payloadID)
+	raw, err := parseWrbFr(body, payloadID)
+	if err != nil {
+		// Not always fatal to the caller (batchFilenames degrades to
+		// media-key filenames on failure, for instance), but a bad RPC
+		// response is the first symptom of a session gone stale, so this
+		// logs regardless of what the caller ends up doing about it —
+		// otherwise a listPage failure surfaces as just "list page: RPC
+		// lcxiM: no matching wrb.fr response found", with no way to tell
+		// from that alone whether it's an auth redirect, a rate limit, or
+		// something else.
+		log.Printf("gphotos: RPC %s failed (http %d): %v; response: %s", rpcid, resp.StatusCode, err, snippet(body, 300))
+		return nil, fmt.Errorf("RPC %s: %w", rpcid, err)
+	}
+	return raw, nil
+}
+
+// snippet renders body as a single log line: newlines escaped, truncated to
+// n bytes.
+func snippet(body []byte, n int) string {
+	s := strings.ReplaceAll(string(body), "\n", "\\n")
+	if len(s) > n {
+		s = s[:n] + "...(truncated)"
+	}
+	return s
 }
 
 // parseWrbFr replicates gpwc's trick: the response is Google's chunked
@@ -239,11 +392,18 @@ type libraryItem struct {
 	BaseURL     string // thumbnail/base url; append "=d" (photo) or "=dv" (video) for original
 	TimestampMS int64
 	DedupKey    string
+	// TimezoneOffsetMS is the item's own capture timezone, as an offset
+	// from UTC in milliseconds (e.g. 32400000 for UTC+9). Used to bucket
+	// files by the date they were actually taken in local time, not
+	// whatever UTC happens to say. Zero (UTC) if the response didn't
+	// include one.
+	TimezoneOffsetMS int64
 }
 
 // parseLibraryItems decodes a list of items in the common shape shared by
 // lcxiM (library listing) and wgZjtc (RAW-group lookup): each item is
-// [media_key, [base_url, width, height, ...], timestamp_ms, dedup_key, ...].
+// [media_key, [base_url, width, height, ...], timestamp_ms, dedup_key,
+// timezone_offset_ms, ...].
 func parseLibraryItems(rawItems []json.RawMessage) []libraryItem {
 	items := make([]libraryItem, 0, len(rawItems))
 	for _, ri := range rawItems {
@@ -253,16 +413,22 @@ func parseLibraryItems(rawItems []json.RawMessage) []libraryItem {
 		}
 		var mediaKey, dedupKey string
 		var thumb []json.RawMessage
-		var ts int64
+		var ts, tzOffsetMS int64
 		json.Unmarshal(arr[0], &mediaKey)
 		json.Unmarshal(arr[1], &thumb)
 		json.Unmarshal(arr[2], &ts)
 		json.Unmarshal(arr[3], &dedupKey)
+		if len(arr) > 4 {
+			json.Unmarshal(arr[4], &tzOffsetMS)
+		}
 		baseURL := ""
 		if len(thumb) > 0 {
 			json.Unmarshal(thumb[0], &baseURL)
 		}
-		items = append(items, libraryItem{MediaKey: mediaKey, BaseURL: baseURL, TimestampMS: ts, DedupKey: dedupKey})
+		items = append(items, libraryItem{
+			MediaKey: mediaKey, BaseURL: baseURL, TimestampMS: ts, DedupKey: dedupKey,
+			TimezoneOffsetMS: tzOffsetMS,
+		})
 	}
 	return items
 }
@@ -525,9 +691,14 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 // writeAtomically writes r to destDir/filename via the tmpSuffix
 // write-then-rename dance (see tmpSuffix's doc comment), so any partial
 // write — network failure, cancellation, the process getting killed
-// outright — never leaves a truncated file at the real name.
+// outright — never leaves a truncated file at the real name. filename may
+// include subdirectory components (see dateSubdir); the parent directory is
+// created if it doesn't exist yet.
 func writeAtomically(destDir, filename string, r io.Reader) error {
 	finalPath := filepath.Join(destDir, filename)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return err
+	}
 	tmpPath := finalPath + tmpSuffix
 	if err := writeBody(tmpPath, r); err != nil {
 		os.Remove(tmpPath)
@@ -640,13 +811,18 @@ func fetchRawCompanionOriginal(ctx context.Context, c *http.Client, item library
 }
 
 // downloadCompanions looks for a RAW/DNG companion of item — a Pixel
-// RAW+JPEG pair's "cover" JPEG, identified by coverFilename matching
-// rawCoverRe — and downloads every companion found. used is the same
+// RAW+JPEG pair's "cover" JPEG, identified by coverFilename (its bare
+// resolved name, not a destDir-relative path — see targetName) matching
+// rawCoverRe — and downloads every companion found. subdir places
+// companions in the same date subdirectory as the cover (see dateSubdir),
+// rather than each companion's own capture time, so a RAW+JPEG pair can
+// never end up split across two folders over a timestamp difference of a
+// few hundred milliseconds around a month boundary. used is the same
 // filename-collision map Mirror's loop already threads through
 // resolveFilename. Returns the companion filenames written, so the caller
 // can record them alongside the cover in the index; nil, nil if item isn't
 // part of a recognized RAW+JPEG group.
-func downloadCompanions(ctx context.Context, c *http.Client, gd *globalData, item libraryItem, coverFilename, destDir string, used map[string]bool) ([]string, error) {
+func downloadCompanions(ctx context.Context, c *http.Client, gd *globalData, item libraryItem, coverFilename, subdir, destDir string, used map[string]bool) ([]string, error) {
 	m := rawCoverRe.FindStringSubmatch(coverFilename)
 	if m == nil {
 		return nil, nil
@@ -678,7 +854,7 @@ func downloadCompanions(ctx context.Context, c *http.Client, gd *globalData, ite
 
 	written := make([]string, 0, len(companions))
 	for _, s := range companions {
-		fn, alreadyOnDisk := resolveFilename(destDir, names[s.MediaKey], s.MediaKey, used)
+		fn, alreadyOnDisk := resolveFilename(destDir, targetName(subdir, names[s.MediaKey], s.MediaKey), s.MediaKey, used)
 		if !alreadyOnDisk {
 			if err := fetchRawCompanionOriginal(ctx, c, s, fn, destDir); err != nil {
 				return written, fmt.Errorf("downloading companion %s: %w", s.MediaKey, err)
@@ -689,24 +865,25 @@ func downloadCompanions(ctx context.Context, c *http.Client, gd *globalData, ite
 	return written, nil
 }
 
-// removeStaleTempFiles deletes any leftover "*.gphotos-tmp" files in
-// destDir: downloads interrupted before their rename to a final name could
-// happen. They're always safe to delete — a media key only gets recorded in
-// the local index after that rename succeeds, so nothing depends on a
-// .gphotos-tmp file's contents, and leaving them around forever would just
-// be clutter (and, if their name happened to already sit in usedNames,
-// unnecessary disambiguation pressure on genuinely new items).
+// removeStaleTempFiles deletes any leftover "*.gphotos-tmp" files anywhere
+// under destDir (files now live under per-item date subdirectories — see
+// dateSubdir — so this has to walk, not just glob the top level): downloads
+// interrupted before their rename to a final name could happen. They're
+// always safe to delete — a media key only gets recorded in the local index
+// after that rename succeeds, so nothing depends on a .gphotos-tmp file's
+// contents, and leaving them around forever would just be clutter (and, if
+// their name happened to already sit in usedNames, unnecessary
+// disambiguation pressure on genuinely new items).
 func removeStaleTempFiles(destDir string) error {
-	matches, err := filepath.Glob(filepath.Join(destDir, "*"+tmpSuffix))
-	if err != nil {
-		return err
-	}
-	for _, m := range matches {
-		if err := os.Remove(m); err != nil {
+	return filepath.WalkDir(destDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		if !d.IsDir() && strings.HasSuffix(path, tmpSuffix) {
+			return os.Remove(path)
+		}
+		return nil
+	})
 }
 
 // ---- local download index: skip items already mirrored on a prior run ----
@@ -794,6 +971,29 @@ func (idx *downloadIndex) save() error {
 	return os.Rename(tmp, idx.path)
 }
 
+// ---- date-based subdirectories (destDir/YYYY/MM/filename) ----
+
+// dateSubdir returns the "YYYY/MM" subdirectory (using the OS path
+// separator) an item's files are organized under, based on the date it was
+// actually taken in ITS OWN local time — not the UTC instant — using its
+// TimezoneOffsetMS. A photo taken at 11pm local time but past midnight UTC
+// would otherwise land in tomorrow's folder.
+func dateSubdir(it libraryItem) string {
+	local := time.UnixMilli(it.TimestampMS).UTC().Add(time.Duration(it.TimezoneOffsetMS) * time.Millisecond)
+	return filepath.Join(fmt.Sprintf("%04d", local.Year()), fmt.Sprintf("%02d", int(local.Month())))
+}
+
+// targetName builds the destDir-relative path (subdirectory + filename) an
+// item should be saved under, falling back to its media key if resolvedName
+// (from batchFilenames) came back empty.
+func targetName(subdir, resolvedName, mediaKey string) string {
+	base := resolvedName
+	if base == "" {
+		base = mediaKey
+	}
+	return filepath.Join(subdir, base)
+}
+
 // ---- Mirror: walk the library newest-first, stop once older than after ----
 
 // Mirror downloads Google Photos items into destDir, using the session
@@ -832,10 +1032,24 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 		return fmt.Errorf("loading cookies: %w", err)
 	}
 	client := &http.Client{Jar: jar, Timeout: 60 * time.Second}
+	logCookieStatus(client, "cookies loaded from "+cookiesPath)
 
 	gd, err := fetchGlobalData(ctx, client)
 	if err != nil {
-		return fmt.Errorf("session bootstrap failed: %w", err)
+		// The short-lived __Secure-1PSIDTS/__Secure-3PSIDTS can already be
+		// stale by the time this runs — even moments after export, if
+		// export-to-run took long enough — well before sessionRefreshInterval
+		// ever gets a chance to kick in. If the long-lived account cookies
+		// (SID, SAPISID, ...) are still good, a rotation can mint a fresh
+		// short-lived one and recover without making the user re-export.
+		log.Printf("gphotos: initial session bootstrap failed (%v), trying a cookie rotation before giving up", err)
+		if rotErr := rotateCookies(ctx, client, rotateCookiesURL); rotErr != nil {
+			return fmt.Errorf("session bootstrap failed: %w (rotation also failed: %v)", err, rotErr)
+		}
+		gd, err = fetchGlobalData(ctx, client)
+		if err != nil {
+			return fmt.Errorf("session bootstrap failed even after rotating cookies: %w", err)
+		}
 	}
 
 	idx, err := loadDownloadIndex(destDir)
@@ -864,9 +1078,20 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 			usedNames[fn] = true
 		}
 	}
+	lastRefresh := time.Now() // session (incl. gd) is already fresh from the bootstrap above
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+
+		if time.Since(lastRefresh) > sessionRefreshInterval {
+			log.Printf("gphotos: refreshing session (%s since last refresh)", time.Since(lastRefresh).Round(time.Second))
+			if freshGD, err := refreshSession(ctx, client); err != nil {
+				log.Printf("gphotos: session refresh failed, continuing with the existing session: %v", err)
+			} else {
+				gd = freshGD
+			}
+			lastRefresh = time.Now()
 		}
 
 		items, next, err := listPage(ctx, client, gd, startTS, pageID)
@@ -909,7 +1134,9 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 			}
 
 			for _, it := range newItems {
-				fn, alreadyOnDisk := resolveFilename(destDir, names[it.MediaKey], it.MediaKey, usedNames)
+				subdir := dateSubdir(it)
+				baseName := names[it.MediaKey]
+				fn, alreadyOnDisk := resolveFilename(destDir, targetName(subdir, baseName, it.MediaKey), it.MediaKey, usedNames)
 				if alreadyOnDisk {
 					log.Printf("gphotos: adopting existing %s into index (%s)", fn, time.UnixMilli(it.TimestampMS).Format(time.RFC3339))
 					idx.record(it.MediaKey, []string{fn}, it.TimestampMS)
@@ -923,7 +1150,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 					}
 					filenames := []string{fn}
 					if tryCompanions {
-						extra, err := downloadCompanions(ctx, client, gd, it, fn, destDir, usedNames)
+						extra, err := downloadCompanions(ctx, client, gd, it, baseName, subdir, destDir, usedNames)
 						if err != nil {
 							log.Printf("gphotos:   companion lookup failed for %s: %v", it.MediaKey, err)
 						} else if len(extra) > 0 {

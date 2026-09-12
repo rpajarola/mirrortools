@@ -4,14 +4,61 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestFingerprint(t *testing.T) {
+	if got := fingerprint(""); got != "<absent>" {
+		t.Errorf("empty: got %q", got)
+	}
+	if got := fingerprint("ab"); got != "<len=2 ...ab>" {
+		t.Errorf("short: got %q", got)
+	}
+	long := "abcdefghij1234567890"
+	if got, want := fingerprint(long), "<len=20 ...567890>"; got != want {
+		t.Errorf("long: got %q, want %q", got, want)
+	}
+	// Never leaks enough to reconstruct the cookie.
+	if strings.Contains(fingerprint(long), long) {
+		t.Errorf("fingerprint leaked the full value: %q", fingerprint(long))
+	}
+}
+
+func TestCookieValue(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(&url.URL{Scheme: "https", Host: "google.com"}, []*http.Cookie{
+		{Name: "SID", Value: "secret-value", Domain: "google.com"},
+	})
+	c := &http.Client{Jar: jar}
+
+	if got := cookieValue(c, "google.com", "SID"); got != "secret-value" {
+		t.Errorf("got %q", got)
+	}
+	if got := cookieValue(c, "google.com", "NOPE"); got != "" {
+		t.Errorf("absent cookie: got %q", got)
+	}
+}
+
+func TestSnippet(t *testing.T) {
+	if got := snippet([]byte("line1\nline2"), 100); got != "line1\\nline2" {
+		t.Errorf("got %q", got)
+	}
+	if got := snippet([]byte("0123456789"), 5); got != "01234...(truncated)" {
+		t.Errorf("got %q", got)
+	}
+}
 
 func TestParseBatchFilenames(t *testing.T) {
 	// Shape: raw[0] = [ <ignored>, [items...] ], matching safe_get(data, 0,
@@ -101,6 +148,41 @@ func TestResolveFilenameDisambiguatesKnownCollision(t *testing.T) {
 	name2, adopted2 := resolveFilename(dir, "IMG_0001.jpg", "mk3", used)
 	if name2 != "IMG_0001-3.jpg" || adopted2 {
 		t.Fatalf("got %q, adopted=%v", name2, adopted2)
+	}
+}
+
+func TestDateSubdir(t *testing.T) {
+	// 2026-01-01 00:30 UTC is still 2025-12-31 in UTC-9 local time — the
+	// whole point of using TimezoneOffsetMS instead of raw UTC.
+	ts := time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC).UnixMilli()
+	it := libraryItem{TimestampMS: ts, TimezoneOffsetMS: -9 * 3600 * 1000}
+
+	want := filepath.Join("2025", "12")
+	if got := dateSubdir(it); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestDateSubdirUTCFallback(t *testing.T) {
+	// A zero TimezoneOffsetMS (e.g. an older response missing the field)
+	// falls back to plain UTC rather than erroring.
+	ts := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC).UnixMilli()
+	it := libraryItem{TimestampMS: ts}
+
+	want := filepath.Join("2026", "06")
+	if got := dateSubdir(it); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestTargetName(t *testing.T) {
+	if got, want := targetName("2026/09", "IMG_0001.jpg", "mk1"), filepath.Join("2026/09", "IMG_0001.jpg"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// Empty resolvedName falls back to the media key, same as
+	// resolveFilename's own internal fallback.
+	if got, want := targetName("2026/09", "", "mk1"), filepath.Join("2026/09", "mk1"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
@@ -208,9 +290,62 @@ func TestDownloadCompanionsNoMatchReturnsNil(t *testing.T) {
 	// out before making any network call (nil client would panic if it
 	// tried).
 	item := libraryItem{MediaKey: "mk1"}
-	extra, err := downloadCompanions(context.Background(), nil, nil, item, "IMG_0001.jpg", t.TempDir(), map[string]bool{})
+	extra, err := downloadCompanions(context.Background(), nil, nil, item, "IMG_0001.jpg", "2026/09", t.TempDir(), map[string]bool{})
 	if err != nil || extra != nil {
 		t.Fatalf("got %v, %v; want nil, nil", extra, err)
+	}
+}
+
+func TestRotateCookiesSendsExpectedRequest(t *testing.T) {
+	var gotMethod, gotContentType, gotOrigin, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		gotOrigin = r.Header.Get("Origin")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := rotateCookies(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q", gotMethod)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type: got %q", gotContentType)
+	}
+	if gotOrigin != "https://accounts.google.com" {
+		t.Errorf("Origin: got %q", gotOrigin)
+	}
+	if gotBody != `[000,"-0000000000000000000"]` {
+		t.Errorf("body: got %q", gotBody)
+	}
+}
+
+func TestRotateCookiesUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	err := rotateCookies(context.Background(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+}
+
+func TestRotateCookiesUnexpectedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	err := rotateCookies(context.Background(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected an error for a non-200 response")
 	}
 }
 
@@ -247,6 +382,18 @@ func TestDownloadOriginalWritesViaTempThenRename(t *testing.T) {
 	}
 }
 
+func TestWriteAtomicallyCreatesParentDirs(t *testing.T) {
+	dir := t.TempDir()
+	name := filepath.Join("2026", "09", "photo.jpg")
+	if err := writeAtomically(dir, name, bytes.NewReader([]byte("photo bytes"))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil || !bytes.Equal(got, []byte("photo bytes")) {
+		t.Fatalf("final file: got %q, %v", got, err)
+	}
+}
+
 func TestDownloadOriginalCanceledLeavesNoFinalFile(t *testing.T) {
 	block := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +425,14 @@ func TestDownloadOriginalCanceledLeavesNoFinalFile(t *testing.T) {
 
 func TestRemoveStaleTempFiles(t *testing.T) {
 	dir := t.TempDir()
-	stale := filepath.Join(dir, "IMG_0001.jpg"+tmpSuffix)
+	// Files now live under per-item date subdirectories, so a stale temp
+	// file can be nested arbitrarily deep — this must walk, not just glob
+	// the top level.
+	nested := filepath.Join(dir, "2026", "09")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(nested, "IMG_0001.jpg"+tmpSuffix)
 	keep := filepath.Join(dir, "IMG_0002.jpg")
 	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
