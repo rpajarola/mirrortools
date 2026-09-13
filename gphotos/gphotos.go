@@ -5,9 +5,13 @@
 // date, EWgK9e = batch item info/filenames).
 //
 // This is NOT the official API. It uses your logged-in browser session
-// (cookies), not OAuth. Cookies come from a one-time manual export — see
-// loadCookiesFromNetscapeFile. There's no browser/Playwright dependency at
-// runtime, only for that initial cookie grab.
+// (cookies), not OAuth — as of March 2025 there's no OAuth-based official
+// API left that can bulk-read an existing library at all, so this is the
+// only way to mirror one programmatically. Cookies come from either a
+// one-time manual cookies.txt export or, on macOS, directly from Safari's
+// live cookie store (see loadCookies). There's no browser/Playwright
+// dependency at runtime, only for the initial cookies.txt export if you use
+// that route.
 //
 // It registers itself as the "gphotos" method with mirrortools' mirror
 // package, so it's normally driven through the mirror CLI:
@@ -20,6 +24,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,6 +32,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -47,7 +53,9 @@ func init() {
 			"the account actually mirrored is whichever one -cookies belongs to",
 		Describe: "download original-quality Google Photos via the undocumented photos.google.com batchexecute API",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
-			cookiesPath := fs.String("cookies", "cookies.txt", "Netscape cookies.txt exported after logging into photos.google.com")
+			cookiesPath := fs.String("cookies", "cookies.txt", "cookies for photos.google.com: either a Netscape cookies.txt export, "+
+				"or (macOS) a path straight to a binarycookies file, e.g. ~/Library/Cookies/Cookies.binarycookies for Safari's live jar "+
+				"— format is auto-detected")
 			after := fs.String("after", "", "only download items taken on/after this date, YYYY-MM-DD (default: no lower bound)")
 			before := fs.String("before", "", "only download items taken on/before this date, YYYY-MM-DD (default: now)")
 			last := fs.String("last", "", "only download items taken in the last duration, e.g. 30d, 2w, 6m, 1y "+
@@ -534,6 +542,72 @@ func parseBatchFilenames(raw json.RawMessage) (map[string]string, error) {
 // unauthenticated session.
 const httpOnlyPrefix = "#HttpOnly_"
 
+// loadCookies loads cookies from path into jar, auto-detecting the format:
+// Apple's binarycookies format (magic "cook" — e.g. macOS's
+// ~/Library/Cookies/Cookies.binarycookies, Safari/WebKit's live cookie
+// store) or a Netscape-format cookies.txt export. Safari isn't subject to
+// Chrome's Device Bound Session Credentials, so pointing this straight at a
+// live Safari cookie jar is one way to get a session that isn't dead on
+// arrival if that's what's blocking Chrome-exported cookies.
+func loadCookies(jar *cookiejar.Jar, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	magic := make([]byte, 4)
+	n, _ := io.ReadFull(f, magic)
+	f.Close()
+
+	if n == 4 && bytes.Equal(magic, binaryCookiesMagic) {
+		return loadCookiesFromBinaryCookies(jar, path)
+	}
+	return loadCookiesFromNetscapeFile(jar, path)
+}
+
+// applyCookies sets byHost's cookies (keyed by bare host — leading "."
+// already stripped, see the two loaders below) into jar, failing clearly if
+// none of Google's core auth cookies showed up for google.com rather than
+// deferring to the much more confusing "WIZ_global_data not found" error
+// that would otherwise only surface much later.
+func applyCookies(jar *cookiejar.Jar, path string, byHost map[string][]*http.Cookie) error {
+	const sidCookie = "SID" // one of the core Google auth cookies; always HttpOnly
+	haveSID := false
+	for _, c := range byHost["google.com"] {
+		if c.Name == sidCookie {
+			haveSID = true
+			break
+		}
+	}
+	if !haveSID {
+		return fmt.Errorf("no %q cookie found for google.com in %s — re-export cookies.txt "+
+			"while logged into photos.google.com (make sure the export includes HttpOnly cookies)", sidCookie, path)
+	}
+
+	for host, cookies := range byHost {
+		u := &url.URL{Scheme: "https", Host: host}
+		jar.SetCookies(u, cookies)
+	}
+	return nil
+}
+
+// domainCookie builds an *http.Cookie from a stored domain string that may
+// carry a leading dot, splitting it into the bare host to key byHost by and
+// the http.Cookie itself. A leading dot means "this domain and all
+// subdomains" — a domain cookie; Cookie.Domain has to be set to tell
+// cookiejar to treat it that way. Leaving it unset makes a host-only cookie
+// good for exactly "google.com" and never sent on requests to
+// photos.google.com, which is why every request used to look logged-out no
+// matter how fresh the cookies were (see loadCookiesFromNetscapeFile's git
+// history for the incident this fixed).
+func domainCookie(domain, name, value string) (host string, cookie *http.Cookie) {
+	host = strings.TrimPrefix(domain, ".")
+	cookie = &http.Cookie{Name: name, Value: value}
+	if strings.HasPrefix(domain, ".") {
+		cookie.Domain = host
+	}
+	return host, cookie
+}
+
 // loadCookiesFromNetscapeFile loads a Netscape-format cookies.txt (e.g. from
 // the "Get cookies.txt LOCALLY" Chrome extension, exported after a manual
 // login to photos.google.com). This is the one step that still needs a real
@@ -559,42 +633,210 @@ func loadCookiesFromNetscapeFile(jar *cookiejar.Jar, path string) error {
 			continue
 		}
 		domain, _, _, _, _, name, value := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
-		host := strings.TrimPrefix(domain, ".")
-		cookie := &http.Cookie{Name: name, Value: value}
-		if strings.HasPrefix(domain, ".") {
-			// Leading dot in the Netscape format means "this domain and all
-			// subdomains" — a domain cookie. Setting Cookie.Domain tells
-			// cookiejar to treat it that way; leaving it empty (as before)
-			// makes it a host-only cookie good for exactly "google.com" and
-			// never sent on requests to photos.google.com, which is why
-			// every request looked logged-out no matter how fresh the
-			// cookies were.
-			cookie.Domain = host
-		}
+		host, cookie := domainCookie(domain, name, value)
 		byHost[host] = append(byHost[host], cookie)
 	}
 	if err := sc.Err(); err != nil {
 		return err
 	}
 
-	const sidCookie = "SID" // one of the core Google auth cookies; always HttpOnly
-	haveSID := false
-	for _, c := range byHost["google.com"] {
-		if c.Name == sidCookie {
-			haveSID = true
-			break
-		}
+	return applyCookies(jar, path, byHost)
+}
+
+// ---- macOS/Safari binary cookie jar (Cookies.binarycookies) ----
+//
+// Format reverse-engineered by the community — not documented by Apple —
+// cross-checked byte-for-byte against github.com/cixtor/binarycookies, an
+// actively maintained independent Go implementation, rather than
+// implemented from memory alone:
+//
+//	"cook" magic (4 bytes)
+//	page count (4 bytes, big-endian)
+//	one page size per page (4 bytes each, big-endian)
+//	for each page:
+//	  page tag 00 00 01 00 (4 bytes)
+//	  cookie count in this page (4 bytes, little-endian)
+//	  one cookie offset per cookie (4 bytes each, little-endian — informational; cookies are read sequentially regardless)
+//	  page end 00 00 00 00 (4 bytes)
+//	  for each cookie, sequentially:
+//	    size (4 bytes LE) — total record size
+//	    unknown (4 bytes), flags (4 bytes LE), unknown (4 bytes)
+//	    comment/domain/name/path/value offsets (4 bytes LE each, relative to the record start)
+//	    end header 00 00 00 00 (4 bytes)
+//	    expires, creation (8 bytes LE float64 each — Mac absolute time, seconds since 2001-01-01)
+//	    comment, domain, name, path, value: null-terminated strings back to
+//	    back in that order; each one's length is the delta to the next
+//	    field's offset (the value field's end is the record's overall size)
+//	8-byte checksum, optionally followed by a trailing bplist — both ignored
+var binaryCookiesMagic = []byte("cook")
+
+// macEpochOffset is the number of seconds from the Unix epoch to
+// 2001-01-01, when Mac absolute time (used for this format's timestamps)
+// starts.
+const macEpochOffset = 978307200
+
+// loadCookiesFromBinaryCookies loads cookies from an Apple binarycookies
+// file into jar. Unlike loadCookiesFromNetscapeFile, this reads the
+// browser's whole cookie store, not a single site's export, so it's
+// filtered to google.com and its subdomains — everything else in there is
+// no business of ours to load.
+func loadCookiesFromBinaryCookies(jar *cookiejar.Jar, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
-	if !haveSID {
-		return fmt.Errorf("no %q cookie found for google.com in %s — re-export cookies.txt "+
-			"while logged into photos.google.com (make sure the export includes HttpOnly cookies)", sidCookie, path)
+	r := bytes.NewReader(data)
+
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(r, magic); err != nil || !bytes.Equal(magic, binaryCookiesMagic) {
+		return fmt.Errorf("%s: not a binarycookies file (bad magic)", path)
 	}
 
-	for host, cookies := range byHost {
-		u := &url.URL{Scheme: "https", Host: host}
-		jar.SetCookies(u, cookies)
+	var pageCount uint32
+	if err := binary.Read(r, binary.BigEndian, &pageCount); err != nil {
+		return fmt.Errorf("%s: reading page count: %w", path, err)
 	}
-	return nil
+	pageSizes := make([]uint32, pageCount)
+	for i := range pageSizes {
+		if err := binary.Read(r, binary.BigEndian, &pageSizes[i]); err != nil {
+			return fmt.Errorf("%s: reading page sizes: %w", path, err)
+		}
+	}
+
+	byHost := map[string][]*http.Cookie{}
+	now := time.Now()
+	for pageNum, size := range pageSizes {
+		page := make([]byte, size)
+		if _, err := io.ReadFull(r, page); err != nil {
+			return fmt.Errorf("%s: reading page %d: %w", path, pageNum, err)
+		}
+		cookies, err := parseBinaryCookiesPage(page)
+		if err != nil {
+			return fmt.Errorf("%s: page %d: %w", path, pageNum, err)
+		}
+		for _, bc := range cookies {
+			if bc.expires.Before(now) {
+				continue // stale; a live browser wouldn't send this either
+			}
+			if host := strings.TrimPrefix(bc.domain, "."); host != "google.com" && !strings.HasSuffix(host, ".google.com") {
+				continue
+			}
+			host, cookie := domainCookie(bc.domain, bc.name, bc.value)
+			byHost[host] = append(byHost[host], cookie)
+		}
+	}
+
+	return applyCookies(jar, path, byHost)
+}
+
+// binCookie is one cookie as decoded from a binarycookies page, before
+// domain-filtering and conversion to an *http.Cookie.
+type binCookie struct {
+	domain, name, value string
+	expires             time.Time
+}
+
+// parseBinaryCookiesPage decodes every cookie in one page.
+func parseBinaryCookiesPage(page []byte) ([]binCookie, error) {
+	r := bytes.NewReader(page)
+
+	var tag [4]byte
+	if _, err := io.ReadFull(r, tag[:]); err != nil {
+		return nil, fmt.Errorf("reading page tag: %w", err)
+	}
+	if tag != [4]byte{0x00, 0x00, 0x01, 0x00} {
+		return nil, fmt.Errorf("unexpected page tag %x", tag)
+	}
+
+	var count uint32
+	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
+		return nil, fmt.Errorf("reading cookie count: %w", err)
+	}
+	offsets := make([]uint32, count)
+	for i := range offsets {
+		if err := binary.Read(r, binary.LittleEndian, &offsets[i]); err != nil {
+			return nil, fmt.Errorf("reading cookie offset: %w", err)
+		}
+	}
+	var end [4]byte
+	if _, err := io.ReadFull(r, end[:]); err != nil {
+		return nil, fmt.Errorf("reading page end: %w", err)
+	}
+
+	cookies := make([]binCookie, 0, count)
+	for i := uint32(0); i < count; i++ {
+		c, err := parseBinaryCookieRecord(r)
+		if err != nil {
+			return nil, fmt.Errorf("cookie %d: %w", i, err)
+		}
+		cookies = append(cookies, c)
+	}
+	return cookies, nil
+}
+
+// parseBinaryCookieRecord decodes one cookie record from r, which must be
+// positioned at the record's first byte.
+func parseBinaryCookieRecord(r io.Reader) (binCookie, error) {
+	var hdr struct {
+		Size, Unknown1, Flags, Unknown2                   uint32
+		DomainOff, NameOff, PathOff, ValueOff, CommentOff uint32
+		End                                               [4]byte
+		ExpiresRaw, CreationRaw                           uint64
+	}
+	if err := binary.Read(r, binary.LittleEndian, &hdr); err != nil {
+		return binCookie{}, fmt.Errorf("reading cookie header: %w", err)
+	}
+
+	// Fields are laid out back to back starting right here (comment,
+	// domain, name, path, value, each null-terminated); each one's nominal
+	// length is the delta to the next field's offset. For the value field
+	// specifically, current Safari appends a fixed-size trailing
+	// "bplist00"-format blob (an NSDate under key "AccessTime") AFTER its
+	// null terminator, still within that delta — confirmed by inspecting a
+	// real Cookies.binarycookies file's raw bytes byte-for-byte, since
+	// neither Apple nor any community write-up of this format documents
+	// it. Truncating at the first NUL found, rather than trusting the
+	// whole span, discards that trailer instead of appending it onto the
+	// cookie value — the earlier version of this function did the latter,
+	// which corrupted every cookie's value with ~66 bytes of binary plist
+	// data and made every request using them fail authentication.
+	readField := func(from, to uint32) (string, error) {
+		if to < from {
+			return "", fmt.Errorf("invalid field bounds [%d,%d)", from, to)
+		}
+		buf := make([]byte, to-from)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return "", err
+		}
+		if i := bytes.IndexByte(buf, 0); i >= 0 {
+			return string(buf[:i]), nil
+		}
+		return string(buf), nil
+	}
+
+	if hdr.CommentOff != 0 {
+		if _, err := readField(hdr.CommentOff, hdr.DomainOff); err != nil {
+			return binCookie{}, fmt.Errorf("reading comment: %w", err)
+		}
+	}
+	domain, err := readField(hdr.DomainOff, hdr.NameOff)
+	if err != nil {
+		return binCookie{}, fmt.Errorf("reading domain: %w", err)
+	}
+	name, err := readField(hdr.NameOff, hdr.PathOff)
+	if err != nil {
+		return binCookie{}, fmt.Errorf("reading name: %w", err)
+	}
+	if _, err := readField(hdr.PathOff, hdr.ValueOff); err != nil { // path, unused
+		return binCookie{}, fmt.Errorf("reading path: %w", err)
+	}
+	value, err := readField(hdr.ValueOff, hdr.Size)
+	if err != nil {
+		return binCookie{}, fmt.Errorf("reading value: %w", err)
+	}
+
+	expires := time.Unix(int64(math.Float64frombits(hdr.ExpiresRaw))+macEpochOffset, 0)
+	return binCookie{domain: domain, name: name, value: value, expires: expires}, nil
 }
 
 // ---- download ----
@@ -1028,7 +1270,7 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	}
 
 	jar, _ := cookiejar.New(nil)
-	if err := loadCookiesFromNetscapeFile(jar, cookiesPath); err != nil {
+	if err := loadCookies(jar, cookiesPath); err != nil {
 		return fmt.Errorf("loading cookies: %w", err)
 	}
 	client := &http.Client{Jar: jar, Timeout: 60 * time.Second}

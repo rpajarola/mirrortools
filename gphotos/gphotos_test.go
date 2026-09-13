@@ -3,8 +3,10 @@ package gphotos
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -48,6 +50,237 @@ func TestCookieValue(t *testing.T) {
 	}
 	if got := cookieValue(c, "google.com", "NOPE"); got != "" {
 		t.Errorf("absent cookie: got %q", got)
+	}
+}
+
+// ---- binarycookies test fixtures ----
+//
+// These build a .binarycookies file byte-by-byte from the format spec,
+// independently of parseBinaryCookieRecord/parseBinaryCookiesPage's own
+// logic, so the tests actually catch a parsing bug rather than just
+// mirroring whatever the parser happens to do.
+
+type testBinCookie struct {
+	domain, name, value, path string
+	expiresIn                 time.Duration // relative to time.Now(); negative = already expired
+	// valueTrailer simulates the fixed-size bplist blob current Safari
+	// appends after the value's own null terminator, still within the
+	// value field's declared span — see parseBinaryCookieRecord's
+	// readField comment for why this matters.
+	valueTrailer []byte
+}
+
+func buildCookieRecord(t *testing.T, c testBinCookie) []byte {
+	t.Helper()
+	const headerSize = 56 // 9 uint32 fields + 4-byte end marker + 2 uint64 fields = 9*4+4+2*8 = 56
+	domain := append([]byte(c.domain), 0)
+	name := append([]byte(c.name), 0)
+	path := append([]byte(c.path), 0)
+	value := append(append([]byte(c.value), 0), c.valueTrailer...)
+
+	domainOff := uint32(headerSize)
+	nameOff := domainOff + uint32(len(domain))
+	pathOff := nameOff + uint32(len(name))
+	valueOff := pathOff + uint32(len(path))
+	size := valueOff + uint32(len(value))
+
+	expiresRaw := math.Float64bits(float64(time.Now().Add(c.expiresIn).Unix() - macEpochOffset))
+	creationRaw := math.Float64bits(float64(time.Now().Unix() - macEpochOffset))
+
+	var buf bytes.Buffer
+	put32 := func(v uint32) { binary.Write(&buf, binary.LittleEndian, v) }
+	put64 := func(v uint64) { binary.Write(&buf, binary.LittleEndian, v) }
+
+	put32(size)
+	put32(0) // unknown1
+	put32(0) // flags
+	put32(0) // unknown2
+	put32(domainOff)
+	put32(nameOff)
+	put32(pathOff)
+	put32(valueOff)
+	put32(0) // commentOff = 0 (no comment)
+	buf.Write([]byte{0, 0, 0, 0})
+	put64(expiresRaw)
+	put64(creationRaw)
+	buf.Write(domain)
+	buf.Write(name)
+	buf.Write(path)
+	buf.Write(value)
+
+	if uint32(buf.Len()) != size {
+		t.Fatalf("test fixture bug: built %d bytes but computed size %d", buf.Len(), size)
+	}
+	return buf.Bytes()
+}
+
+func buildBinaryCookiesFile(t *testing.T, cookies []testBinCookie) []byte {
+	t.Helper()
+	var blobs [][]byte
+	for _, c := range cookies {
+		blobs = append(blobs, buildCookieRecord(t, c))
+	}
+
+	var page bytes.Buffer
+	page.Write([]byte{0, 0, 1, 0}) // page tag
+	binary.Write(&page, binary.LittleEndian, uint32(len(cookies)))
+
+	offset := uint32(4 + 4 + 4*len(cookies) + 4) // tag + count + offsets + page-end
+	for _, blob := range blobs {
+		binary.Write(&page, binary.LittleEndian, offset)
+		offset += uint32(len(blob))
+	}
+	page.Write([]byte{0, 0, 0, 0}) // page end
+	for _, blob := range blobs {
+		page.Write(blob)
+	}
+
+	var file bytes.Buffer
+	file.Write([]byte("cook"))
+	binary.Write(&file, binary.BigEndian, uint32(1)) // page count
+	binary.Write(&file, binary.BigEndian, uint32(page.Len()))
+	file.Write(page.Bytes())
+	file.Write(make([]byte, 8)) // checksum, ignored by our parser
+	return file.Bytes()
+}
+
+func TestLoadCookiesFromBinaryCookiesStripsValueTrailer(t *testing.T) {
+	// Regression test for a real bug: a naive "trim one trailing NUL" read
+	// swallowed this trailer straight into the cookie value, corrupting it
+	// with ~66 bytes of binary plist data and breaking authentication.
+	data := buildBinaryCookiesFile(t, []testBinCookie{
+		{
+			domain: ".google.com", name: "SID", value: "clean-sid-value", expiresIn: time.Hour,
+			valueTrailer: append([]byte("bplist00"), 0xd1, 0x01, 0x02, 0x5a, 'A', 'c', 'c', 'e', 's', 's', 'T', 'i', 'm', 'e', 0x23),
+		},
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cookies.binarycookies")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loadCookiesFromBinaryCookies(jar, path); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range jar.Cookies(&url.URL{Scheme: "https", Host: "photos.google.com"}) {
+		if c.Name == "SID" && c.Value != "clean-sid-value" {
+			t.Fatalf("SID value contaminated by trailer: %q", c.Value)
+		}
+	}
+}
+
+func TestLoadCookiesFromBinaryCookies(t *testing.T) {
+	data := buildBinaryCookiesFile(t, []testBinCookie{
+		{domain: ".google.com", name: "SID", value: "sid-value", expiresIn: 24 * time.Hour},
+		{domain: ".google.com", name: "__Secure-1PSIDTS", value: "sidts-value", expiresIn: time.Hour},
+		{domain: ".example.com", name: "unrelated", value: "should-be-filtered-out", expiresIn: 24 * time.Hour},
+		{domain: ".google.com", name: "expired-cookie", value: "stale", expiresIn: -time.Hour},
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cookies.binarycookies")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loadCookiesFromBinaryCookies(jar, path); err != nil {
+		t.Fatal(err)
+	}
+
+	// A domain cookie (leading dot) must reach photos.google.com, not just
+	// the bare google.com it was recorded under — this is the same
+	// domain-vs-host-only distinction that bit the Netscape-file loader.
+	got := map[string]string{}
+	for _, c := range jar.Cookies(&url.URL{Scheme: "https", Host: "photos.google.com"}) {
+		got[c.Name] = c.Value
+	}
+	if got["SID"] != "sid-value" {
+		t.Errorf("SID: got %q", got["SID"])
+	}
+	if got["__Secure-1PSIDTS"] != "sidts-value" {
+		t.Errorf("__Secure-1PSIDTS: got %q", got["__Secure-1PSIDTS"])
+	}
+	if _, ok := got["unrelated"]; ok {
+		t.Errorf("non-google.com cookie leaked into the jar: %v", got)
+	}
+	if _, ok := got["expired-cookie"]; ok {
+		t.Errorf("expired cookie should have been filtered out: %v", got)
+	}
+}
+
+func TestLoadCookiesFromBinaryCookiesNoSID(t *testing.T) {
+	data := buildBinaryCookiesFile(t, []testBinCookie{
+		{domain: ".google.com", name: "NID", value: "v", expiresIn: time.Hour},
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cookies.binarycookies")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jar, _ := cookiejar.New(nil)
+	if err := loadCookiesFromBinaryCookies(jar, path); err == nil {
+		t.Fatal("expected an error when no SID cookie is present")
+	}
+}
+
+func TestLoadCookiesFromBinaryCookiesBadMagic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "not-binarycookies")
+	if err := os.WriteFile(path, []byte("not a binarycookies file at all"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jar, _ := cookiejar.New(nil)
+	if err := loadCookiesFromBinaryCookies(jar, path); err == nil {
+		t.Fatal("expected an error for bad magic")
+	}
+}
+
+func TestLoadCookiesAutoDetectsFormat(t *testing.T) {
+	dir := t.TempDir()
+
+	binPath := filepath.Join(dir, "bin")
+	binData := buildBinaryCookiesFile(t, []testBinCookie{
+		{domain: ".google.com", name: "SID", value: "from-binarycookies", expiresIn: time.Hour},
+	})
+	if err := os.WriteFile(binPath, binData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	netscapePath := filepath.Join(dir, "netscape.txt")
+	netscapeData := "google.com\tTRUE\t/\tTRUE\t0\tSID\tfrom-netscape\n"
+	if err := os.WriteFile(netscapePath, []byte(netscapeData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ path, wantValue string }{
+		{binPath, "from-binarycookies"},
+		{netscapePath, "from-netscape"},
+	} {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := loadCookies(jar, tc.path); err != nil {
+			t.Fatalf("%s: %v", tc.path, err)
+		}
+		got := ""
+		for _, c := range jar.Cookies(&url.URL{Scheme: "https", Host: "google.com"}) {
+			if c.Name == "SID" {
+				got = c.Value
+			}
+		}
+		if got != tc.wantValue {
+			t.Errorf("%s: got %q, want %q", tc.path, got, tc.wantValue)
+		}
 	}
 }
 
