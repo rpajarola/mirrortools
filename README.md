@@ -7,6 +7,9 @@ Tools for mirroring internet accounts/services to local disk.
   backend implements, and the registry the CLI uses to find them.
 - `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry.
 - `gphotos/` — the Google Photos backend (registers itself as `gphotos`).
+  See [`gphotos/README.md`](gphotos/README.md) for how to get cookies for
+  it, including the Chrome DBSC quirk that can make them stop working
+  within minutes.
 
 Each backend mirrors a `source` (a URL, account email, or other identifier —
 whatever uniquely names the thing for that method) into a destination
