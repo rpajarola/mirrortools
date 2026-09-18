@@ -22,6 +22,7 @@ import (
 	// Adding a new backend package here is the only wiring a new method
 	// needs.
 	_ "github.com/rpajarola/mirrortools/archiveorg"
+	_ "github.com/rpajarola/mirrortools/gopher"
 	_ "github.com/rpajarola/mirrortools/gphotos"
 )
 

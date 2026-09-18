@@ -12,6 +12,8 @@ Tools for mirroring internet accounts/services to local disk.
   within minutes.
 - `archiveorg/` — the Internet Archive backend (registers itself as
   `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
+- `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
+  See [`gopher/README.md`](gopher/README.md).
 
 Each backend mirrors a `source` (a URL, account email, or other identifier —
 whatever uniquely names the thing for that method) into a destination
@@ -38,6 +40,12 @@ subdirectory):
 
 ```
 go run ./cmd/mirror archiveorg https://archive.org/details/some-item ./archive
+```
+
+Or to mirror a Gopher menu tree:
+
+```
+go run ./cmd/mirror gopher gopher://gopher.floodgap.com/1/gopher/toybox ./mirror
 ```
 
 Run `go run ./cmd/mirror` for the list of available methods, or
