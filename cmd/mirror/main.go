@@ -21,6 +21,7 @@ import (
 	// Blank-import every mirroring backend so its init() registers it.
 	// Adding a new backend package here is the only wiring a new method
 	// needs.
+	_ "github.com/rpajarola/mirrortools/archiveorg"
 	_ "github.com/rpajarola/mirrortools/gphotos"
 )
 

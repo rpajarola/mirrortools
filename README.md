@@ -10,6 +10,8 @@ Tools for mirroring internet accounts/services to local disk.
   See [`gphotos/README.md`](gphotos/README.md) for how to get cookies for
   it, including the Chrome DBSC quirk that can make them stop working
   within minutes.
+- `archiveorg/` — the Internet Archive backend (registers itself as
+  `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
 
 Each backend mirrors a `source` (a URL, account email, or other identifier —
 whatever uniquely names the thing for that method) into a destination
@@ -28,6 +30,14 @@ For example, to mirror a Google Photos account:
 
 ```
 go run ./cmd/mirror gphotos -cookies cookies.txt someone@gmail.com ./photos
+```
+
+Or to mirror an Internet Archive item (this lands in `./archive/some-item`,
+since archiveorg mirrors each item into its own `<destdir>/<id>`
+subdirectory):
+
+```
+go run ./cmd/mirror archiveorg https://archive.org/details/some-item ./archive
 ```
 
 Run `go run ./cmd/mirror` for the list of available methods, or
