@@ -14,6 +14,8 @@ Tools for mirroring internet accounts/services to local disk.
   `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
 - `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
   See [`gopher/README.md`](gopher/README.md).
+- `groupsio/` — the groups.io backend (registers itself as `groupsio`). See
+  [`groupsio/README.md`](groupsio/README.md).
 
 Each backend mirrors a `source` (a URL, account email, or other identifier —
 whatever uniquely names the thing for that method) into a destination
@@ -46,6 +48,12 @@ Or to mirror a Gopher menu tree:
 
 ```
 go run ./cmd/mirror gopher gopher://gopher.floodgap.com/1/gopher/toybox ./mirror
+```
+
+Or to mirror a groups.io group's Files section:
+
+```
+go run ./cmd/mirror groupsio -email you@example.com -password-file pw.txt some-group ./mirror
 ```
 
 Run `go run ./cmd/mirror` for the list of available methods, or

@@ -24,6 +24,7 @@ import (
 	_ "github.com/rpajarola/mirrortools/archiveorg"
 	_ "github.com/rpajarola/mirrortools/gopher"
 	_ "github.com/rpajarola/mirrortools/gphotos"
+	_ "github.com/rpajarola/mirrortools/groupsio"
 )
 
 func usage() {
