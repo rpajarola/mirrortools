@@ -16,6 +16,10 @@ Tools for mirroring internet accounts/services to local disk.
   See [`gopher/README.md`](gopher/README.md).
 - `groupsio/` — the groups.io backend (registers itself as `groupsio`). See
   [`groupsio/README.md`](groupsio/README.md).
+- `icloud/` — the iCloud Photos backend (registers itself as `icloud`).
+  See [`icloud/README.md`](icloud/README.md) for the sign-in/2FA flow.
+  **Not yet tested against a real account** — see that README's first
+  section before relying on it.
 
 Each backend mirrors a `source` (a URL, account email, or other identifier —
 whatever uniquely names the thing for that method) into a destination
