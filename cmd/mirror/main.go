@@ -26,6 +26,7 @@ import (
 	_ "github.com/rpajarola/mirrortools/gphotos"
 	_ "github.com/rpajarola/mirrortools/groupsio"
 	_ "github.com/rpajarola/mirrortools/icloud"
+	_ "github.com/rpajarola/mirrortools/rsync"
 )
 
 func usage() {
