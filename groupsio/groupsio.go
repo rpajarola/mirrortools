@@ -109,7 +109,10 @@ const apiBase = "https://groups.io/api/v1"
 // later run could mistake for a complete one.
 const tmpSuffix = ".groupsio-tmp"
 
-const (
+// These are var, not const, solely so tests can shrink the backoff/wait
+// durations and avoid real multi-second (or, for rateLimitWait,
+// multi-minute) sleeps; production behavior is unaffected.
+var (
 	maxAttempts     = 5
 	initialBackoff  = 2 * time.Second
 	rateLimitWait   = 60 * time.Second
@@ -281,10 +284,17 @@ func (c *client) list(ctx context.Context, dirPath string) ([]apiFile, error) {
 	data := resp.Data
 	for resp.HasMore {
 		params.Set("page_token", string(resp.NextPageToken))
-		if err := c.apiGet(ctx, "getfiledirectory", params, &resp); err != nil {
+		// Decode into a fresh listResponse each page, not the same resp
+		// reused in place: json.Unmarshal reuses a slice field's backing
+		// array when it has spare capacity, which would silently overwrite
+		// the previous page's entries still referenced by data through that
+		// same array.
+		var next listResponse
+		if err := c.apiGet(ctx, "getfiledirectory", params, &next); err != nil {
 			return nil, err
 		}
-		data = append(data, resp.Data...)
+		data = append(data, next.Data...)
+		resp = next
 	}
 
 	if len(data) != resp.TotalCount {
