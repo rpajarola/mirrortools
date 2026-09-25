@@ -22,9 +22,28 @@
 // mirrored directly into destDir (no subdirectory), same as earlier versions
 // of this tool always did.
 //
-// Each message is saved as <folder-dir>/<uid>.eml, its raw RFC 822 form —
-// nothing is parsed or reformatted, so the file is exactly what a real mail
-// client would show, and can be fed to any tool that reads .eml files.
+// Each folder is stored as a Maildir: <folder-dir> holds the standard tmp/,
+// new/ and cur/ subdirectories, and every message — written to tmp/ first,
+// then renamed into place only once fully received, the same atomic-write
+// discipline Maildir itself is designed around — lands in cur/, never new/
+// (new/ exists only because a directory needs it to be a valid Maildir;
+// "new" describes mail an MDA has just delivered and no MUA has looked at
+// yet, which isn't a meaningful state for a passive mirror). Its raw RFC 822
+// form is stored unmodified — nothing is parsed or reformatted — so it's
+// exactly what a real mail client would show.
+//
+// A message's filename is <uid>.mirrortools:2,<flags>, where <flags> is its
+// IMAP flags translated to their Maildir letters (Seen->S, Answered->R,
+// Flagged->F, Deleted->T, Draft->D, the $Forwarded keyword->P), sorted as
+// Maildir requires. Embedding the IMAP UID in the filename is not part of
+// the Maildir spec, but is a long-standing convention (used by tools like
+// isync/mbsync) for exactly this purpose: recognizing a message that's
+// already been mirrored without needing an index file. A mirrored message's
+// flags are fixed at whatever they were the moment it was fetched — mirrored
+// once, never revisited — so a flag changing later on the server (e.g. read
+// after the mirror ran) isn't reflected retroactively; that would need
+// re-fetching every message on every run, defeating the incremental UID
+// range described below.
 //
 // Every mailbox is opened read-only (EXAMINE, not SELECT) and every fetch
 // uses IMAP's PEEK option, so mirroring never marks messages as read or
@@ -42,8 +61,8 @@
 // guaranteed to mean the same messages any more, so that folder's mirroring
 // starts over from UID 1. This never deletes anything already on disk, so a
 // UIDVALIDITY change costs a redundant re-download rather than losing data;
-// already-present files are still skipped via the usual exists-on-disk
-// check.
+// a message already in cur/ (found by its UID, regardless of its current
+// flags suffix) is still skipped rather than re-fetched.
 package imap
 
 import (
@@ -69,7 +88,7 @@ func init() {
 	mirror.Register(&mirror.Method{
 		Name:     "imap",
 		Source:   "an IMAP server: host or host:port (always implicit TLS; port defaults to 993)",
-		Describe: "mirror an IMAP account into destDir as one .eml file per message, one subdirectory per folder",
+		Describe: "mirror an IMAP account into destDir as a Maildir per folder",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			user := fs.String("user", "", "IMAP account username (required)")
 			passwordFile := fs.String("password-file", "", "path to a file containing the account's password, "+
@@ -105,13 +124,6 @@ const dialTimeout = 30 * time.Second
 var tlsConfig = func(host string) *tls.Config {
 	return &tls.Config{ServerName: host}
 }
-
-// tmpSuffix marks a file as a download in progress, the same
-// write-then-rename convention used elsewhere in mirrortools: a download cut
-// short by a network failure or the process being killed leaves only a
-// "*.imap-tmp" behind, never a truncated file at the real name that a later
-// run could mistake for a complete one.
-const tmpSuffix = ".imap-tmp"
 
 const (
 	uidValidityFile = ".uidvalidity"
@@ -268,6 +280,10 @@ func mirrorMailbox(client *imapclient.Client, mailbox, dir string) error {
 		return err
 	}
 
+	if err := ensureMaildir(dir); err != nil {
+		return fmt.Errorf("creating maildir: %w", err)
+	}
+
 	log.Printf("imap: mirroring %s (%d messages, UIDVALIDITY %d) into %s, from UID %d",
 		mailbox, selectData.NumMessages, selectData.UIDValidity, dir, lastUID+1)
 
@@ -276,6 +292,7 @@ func mirrorMailbox(client *imapclient.Client, mailbox, dir string) error {
 
 	fetchOptions := &imapv2.FetchOptions{
 		UID:         true,
+		Flags:       true,
 		BodySection: []*imapv2.FetchItemBodySection{{Peek: true}},
 	}
 	cmd := client.Fetch(uidSet, fetchOptions)
@@ -313,71 +330,148 @@ func mirrorMailbox(client *imapclient.Client, mailbox, dir string) error {
 	return nil
 }
 
+// ensureMaildir creates dir's tmp/, new/ and cur/ subdirectories, so dir is
+// a valid (if perpetually new/-empty — see the package doc comment) Maildir.
+func ensureMaildir(dir string) error {
+	for _, sub := range [...]string{"tmp", "new", "cur"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maildirBase is the UID-derived part of a mirrored message's filename,
+// common to both its temporary (tmp/) and final (cur/) names. Not itself a
+// complete Maildir filename — see the package doc comment for the
+// ":2,<flags>" suffix a file in cur/ additionally carries.
+func maildirBase(uid imapv2.UID) string {
+	return fmt.Sprintf("%d.mirrortools", uid)
+}
+
+// maildirHasUID reports whether uid has already been mirrored into dir's
+// cur/, regardless of its current flags suffix (see the package doc comment
+// on why a flag change alone never triggers a re-fetch).
+func maildirHasUID(dir string, uid imapv2.UID) bool {
+	matches, _ := filepath.Glob(filepath.Join(dir, "cur", maildirBase(uid)+":2,*"))
+	return len(matches) > 0
+}
+
+// maildirFlagChars, in the alphabetical order Maildir filenames require,
+// maps each IMAP flag this cares about to its Maildir letter. Uses the
+// widely-implemented (if not core-spec) convention of "P" for the
+// $Forwarded keyword, matching e.g. Dovecot and isync/mbsync.
+var maildirFlagChars = []struct {
+	flag imapv2.Flag
+	char byte
+}{
+	{imapv2.FlagDraft, 'D'},
+	{imapv2.FlagFlagged, 'F'},
+	{imapv2.FlagForwarded, 'P'},
+	{imapv2.FlagAnswered, 'R'},
+	{imapv2.FlagSeen, 'S'},
+	{imapv2.FlagDeleted, 'T'},
+}
+
+func maildirFlagString(flags []imapv2.Flag) string {
+	set := make(map[imapv2.Flag]bool, len(flags))
+	for _, f := range flags {
+		set[f] = true
+	}
+	buf := make([]byte, 0, len(maildirFlagChars))
+	for _, m := range maildirFlagChars {
+		if set[m.flag] {
+			buf = append(buf, m.char)
+		}
+	}
+	return string(buf)
+}
+
 // writeMessage consumes one FETCH response, writing its body section (if
-// any) to destDir/<uid>.eml — unless that file already exists, in which case
-// its literal is drained (required to keep the connection's wire decoder in
-// sync) and discarded. UID is guaranteed to arrive before the body section
-// in a message's data items (imapclient always requests it first for a UID
-// FETCH), so the destination filename is always known before there's
-// anything to write.
-func writeMessage(msg *imapclient.FetchMessageData, destDir string) (uid imapv2.UID, skipped bool, err error) {
+// any) into dir's Maildir — unless UID is already present in cur/, in which
+// case its literal is drained (required to keep the connection's wire
+// decoder in sync) and discarded rather than written anywhere.
+//
+// The body is streamed to tmp/ as soon as it arrives, since its
+// LiteralReader must be consumed before the connection can move on to
+// whatever the server sends next — which, since the IMAP protocol doesn't
+// guarantee FETCH data items arrive in the order they were requested, might
+// be the message's flags, still to come. Only once every item for this
+// message has been seen (so the final flags, if any, are known for certain)
+// is the tmp/ file given its real name and moved into cur/.
+func writeMessage(msg *imapclient.FetchMessageData, dir string) (uid imapv2.UID, skipped bool, err error) {
+	var (
+		flags   []imapv2.Flag
+		tmpPath string
+		gotBody bool
+		haveIt  bool
+	)
 	for {
 		item := msg.Next()
 		if item == nil {
-			return uid, skipped, nil
+			break
 		}
 		switch it := item.(type) {
 		case imapclient.FetchItemDataUID:
 			uid = it.UID
+			haveIt = maildirHasUID(dir, uid)
+		case imapclient.FetchItemDataFlags:
+			flags = it.Flags
 		case imapclient.FetchItemDataBodySection:
 			if uid == 0 {
 				return 0, false, fmt.Errorf("body section arrived before UID")
 			}
-			wroteAny, werr := streamToFile(it.Literal, filepath.Join(destDir, fmt.Sprintf("%d.eml", uid)))
-			if werr != nil {
-				return uid, false, werr
+			gotBody = true
+			if haveIt {
+				if it.Literal != nil {
+					io.Copy(io.Discard, it.Literal)
+				}
+				continue
 			}
-			skipped = !wroteAny
+			if it.Literal == nil {
+				return uid, false, fmt.Errorf("server sent no body")
+			}
+			tmpPath = filepath.Join(dir, "tmp", maildirBase(uid))
+			if err := writeLiteralToFile(it.Literal, tmpPath); err != nil {
+				return uid, false, err
+			}
 		}
 	}
+
+	if haveIt {
+		return uid, true, nil
+	}
+	if !gotBody {
+		return uid, false, fmt.Errorf("server never sent a body section")
+	}
+	finalPath := filepath.Join(dir, "cur", maildirBase(uid)+":2,"+maildirFlagString(flags))
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return uid, false, err
+	}
+	return uid, false, nil
 }
 
-// streamToFile copies r's content to finalPath via a temp file, renamed into
-// place only once the copy finishes — the same atomic write convention used
-// elsewhere in mirrortools. If finalPath already exists, r is still drained
-// (an IMAP literal must be fully consumed before the next response can be
-// read) but not written anywhere. Reports whether it actually wrote the
-// file, for the caller's downloaded/skipped counters.
-func streamToFile(r imapv2.LiteralReader, finalPath string) (wrote bool, err error) {
-	if _, err := os.Stat(finalPath); err == nil {
-		if r != nil {
-			io.Copy(io.Discard, r)
-		}
-		return false, nil
-	}
-	if r == nil {
-		return false, fmt.Errorf("server sent no body for %s", filepath.Base(finalPath))
-	}
-
-	tmpPath := finalPath + tmpSuffix
-	out, err := os.Create(tmpPath)
+// writeLiteralToFile copies r's full content to path, which must not
+// already exist under a different name being relied on for atomicity —
+// writeMessage's caller uses this for a fresh file under tmp/, then renames
+// it into cur/ once it knows the final name. A copy that fails partway
+// leaves nothing at path.
+func writeLiteralToFile(r imapv2.LiteralReader, path string) error {
+	out, err := os.Create(path)
 	if err != nil {
-		return false, err
+		return err
 	}
 	_, copyErr := io.Copy(out, r)
 	closeErr := out.Close()
 	if copyErr != nil {
-		os.Remove(tmpPath)
-		return false, copyErr
+		os.Remove(path)
+		return copyErr
 	}
 	if closeErr != nil {
-		os.Remove(tmpPath)
-		return false, closeErr
+		os.Remove(path)
+		return closeErr
 	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return false, err
-	}
-	return true, nil
+	return nil
 }
 
 // loadLastUID returns the UID to resume mirroring after: the value in

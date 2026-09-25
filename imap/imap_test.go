@@ -105,7 +105,7 @@ func TestMirrorEndToEnd(t *testing.T) {
 
 	checkFile := func(uid int, want string) {
 		t.Helper()
-		got, err := os.ReadFile(filepath.Join(destDir, fmt.Sprintf("%d.eml", uid)))
+		got, err := os.ReadFile(maildirPath(destDir, uid, ""))
 		if err != nil {
 			t.Fatalf("uid %d: %v", uid, err)
 		}
@@ -202,18 +202,19 @@ func TestMirrorAllFoldersEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checkFile := func(rel, want string) {
+	checkFile := func(folderRel string, uid int, want string) {
 		t.Helper()
-		got, err := os.ReadFile(filepath.Join(destDir, filepath.FromSlash(rel)))
+		folderDir := filepath.Join(destDir, filepath.FromSlash(folderRel))
+		got, err := os.ReadFile(maildirPath(folderDir, uid, ""))
 		if err != nil {
-			t.Fatalf("%s: %v", rel, err)
+			t.Fatalf("%s uid %d: %v", folderRel, uid, err)
 		}
 		if string(got) != want {
-			t.Errorf("%s: got %q, want %q", rel, got, want)
+			t.Errorf("%s uid %d: got %q, want %q", folderRel, uid, got, want)
 		}
 	}
-	checkFile("INBOX/1.eml", "inbox message\r\n")
-	checkFile("Archive/2024/1.eml", "archived message\r\n")
+	checkFile("INBOX", 1, "inbox message\r\n")
+	checkFile("Archive/2024", 1, "archived message\r\n")
 
 	if _, err := os.Stat(filepath.Join(destDir, "Archive", uidValidityFile)); !os.IsNotExist(err) {
 		t.Errorf("the \\Noselect 'Archive' folder must not have been mirrored itself, stat err = %v", err)
@@ -225,7 +226,7 @@ func TestMirrorAllFoldersEndToEnd(t *testing.T) {
 	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", ""); err != nil {
 		t.Fatal(err)
 	}
-	checkFile("Archive/2024/2.eml", "second archived message\r\n")
+	checkFile("Archive/2024", 2, "second archived message\r\n")
 	if n := store.fetchRequestCount("INBOX"); n != 2 {
 		t.Errorf("INBOX should have been visited on both runs, got %d fetch round-trips", n)
 	}
@@ -245,9 +246,94 @@ func TestMirrorAllFoldersContinuesPastOneFolderFailure(t *testing.T) {
 	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(destDir, "INBOX", "1.eml"))
+	got, err := os.ReadFile(maildirPath(filepath.Join(destDir, "INBOX"), 1, ""))
 	if err != nil || string(got) != "still works\r\n" {
 		t.Fatalf("INBOX should still have been mirrored despite Broken failing: got %q, %v", got, err)
+	}
+}
+
+// ---- Maildir layout specifics ----
+
+// maildirPath builds the path a mirrored message with the given UID and
+// Maildir flags string (e.g. "FS", or "" for none) is expected at.
+func maildirPath(folderDir string, uid int, flags string) string {
+	return filepath.Join(folderDir, "cur", fmt.Sprintf("%d.mirrortools:2,%s", uid, flags))
+}
+
+func TestMaildirDirectoriesCreated(t *testing.T) {
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
+	store.deliver("INBOX", "hello\r\n")
+
+	addr, cleanup := startFakeIMAPServer(t, store)
+	defer cleanup()
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "INBOX"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sub := range []string{"tmp", "new", "cur"} {
+		fi, err := os.Stat(filepath.Join(destDir, sub))
+		if err != nil || !fi.IsDir() {
+			t.Errorf("%s: got %v, %v, want a directory", sub, fi, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(destDir, "new"))
+	if err != nil || len(entries) != 0 {
+		t.Errorf("new/ should stay empty — mirrored messages always land in cur/ (see the package doc comment): entries=%v, err=%v", entries, err)
+	}
+}
+
+func TestWriteMessageMapsFlagsToMaildirLetters(t *testing.T) {
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
+	store.deliver("INBOX", "flagged and seen\r\n", imapv2.FlagSeen, imapv2.FlagFlagged)
+	store.deliver("INBOX", "answered and deleted\r\n", imapv2.FlagDeleted, imapv2.FlagAnswered)
+
+	addr, cleanup := startFakeIMAPServer(t, store)
+	defer cleanup()
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "INBOX"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(maildirPath(destDir, 1, "FS"))
+	if err != nil || string(got) != "flagged and seen\r\n" {
+		t.Fatalf("uid 1 (Flagged+Seen -> %q): got %q, %v", "FS", got, err)
+	}
+	got, err = os.ReadFile(maildirPath(destDir, 2, "RT"))
+	if err != nil || string(got) != "answered and deleted\r\n" {
+		t.Fatalf("uid 2 (Answered+Deleted -> %q): got %q, %v", "RT", got, err)
+	}
+}
+
+// Regression coverage for the trickier branch of writeMessage: IMAP doesn't
+// guarantee FETCH data items arrive in the order requested, so a message's
+// FLAGS can arrive after its BODY[] literal has already been streamed to
+// tmp/. The file must still end up correctly named in cur/, and no stray
+// tmp/ file left behind.
+func TestWriteMessageHandlesFlagsArrivingAfterBody(t *testing.T) {
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
+	store.deliver("INBOX", "late flags\r\n", imapv2.FlagSeen)
+	store.setFlagsAfterBody("INBOX", true)
+
+	addr, cleanup := startFakeIMAPServer(t, store)
+	defer cleanup()
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "INBOX"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(maildirPath(destDir, 1, "S"))
+	if err != nil || string(got) != "late flags\r\n" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(destDir, "tmp", "*")); len(matches) != 0 {
+		t.Errorf("leftover tmp file(s): %v", matches)
 	}
 }
 
@@ -270,17 +356,19 @@ func equalUints(a, b []imapv2.UID) bool {
 // own. ----
 
 type fakeMessage struct {
-	uid  imapv2.UID
-	body []byte
+	uid   imapv2.UID
+	body  []byte
+	flags []imapv2.Flag
 }
 
 type fakeMailbox struct {
-	uidValidity uint32
-	nextUID     imapv2.UID
-	messages    []fakeMessage
-	fetched     []imapv2.UID
-	fetchCalls  int
-	broken      bool // Select always fails, simulating a server-side error
+	uidValidity    uint32
+	nextUID        imapv2.UID
+	messages       []fakeMessage
+	fetched        []imapv2.UID
+	fetchCalls     int
+	broken         bool // Select always fails, simulating a server-side error
+	flagsAfterBody bool // send FLAGS after BODY[] in FETCH responses, instead of before
 }
 
 type fakeStore struct {
@@ -313,14 +401,20 @@ func (s *fakeStore) breakMailbox(name string) {
 	s.mailboxes[name].broken = true
 }
 
-func (s *fakeStore) deliver(mailbox, body string) imapv2.UID {
+func (s *fakeStore) deliver(mailbox, body string, flags ...imapv2.Flag) imapv2.UID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mb := s.mailboxes[mailbox]
 	uid := mb.nextUID
 	mb.nextUID++
-	mb.messages = append(mb.messages, fakeMessage{uid: uid, body: []byte(body)})
+	mb.messages = append(mb.messages, fakeMessage{uid: uid, body: []byte(body), flags: flags})
 	return uid
+}
+
+func (s *fakeStore) setFlagsAfterBody(mailbox string, v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mailboxes[mailbox].flagsAfterBody = v
 }
 
 func (s *fakeStore) setUIDValidity(mailbox string, v uint32) {
@@ -412,8 +506,21 @@ func (s *fakeSession) Fetch(w *imapserver.FetchWriter, numSet imapv2.NumSet, opt
 	s.store.mu.Lock()
 	mb := s.store.mailboxes[s.selected]
 	msgs := append([]fakeMessage(nil), mb.messages...)
+	flagsAfterBody := mb.flagsAfterBody
 	mb.fetchCalls++
 	s.store.mu.Unlock()
+
+	writeBody := func(rw *imapserver.FetchResponseWriter, m fakeMessage) error {
+		for _, sec := range options.BodySection {
+			wc := rw.WriteBodySection(sec, int64(len(m.body)))
+			if _, err := wc.Write(m.body); err != nil {
+				wc.Close()
+				return err
+			}
+			wc.Close()
+		}
+		return nil
+	}
 
 	for i, m := range msgs {
 		if !uidSet.Contains(m.uid) {
@@ -427,14 +534,22 @@ func (s *fakeSession) Fetch(w *imapserver.FetchWriter, numSet imapv2.NumSet, opt
 		if options.UID {
 			rw.WriteUID(m.uid)
 		}
-		for _, sec := range options.BodySection {
-			wc := rw.WriteBodySection(sec, int64(len(m.body)))
-			if _, err := wc.Write(m.body); err != nil {
-				wc.Close()
+		if flagsAfterBody {
+			if err := writeBody(rw, m); err != nil {
 				rw.Close()
 				return err
 			}
-			wc.Close()
+			if options.Flags {
+				rw.WriteFlags(m.flags)
+			}
+		} else {
+			if options.Flags {
+				rw.WriteFlags(m.flags)
+			}
+			if err := writeBody(rw, m); err != nil {
+				rw.Close()
+				return err
+			}
 		}
 		if err := rw.Close(); err != nil {
 			return err
