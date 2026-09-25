@@ -239,7 +239,21 @@ func Mirror(ctx context.Context, source, destDir string, force bool) error {
 		return err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Minute}
+	// http.Client.Timeout caps the entire request, including reading the
+	// response body — fine for the small metadata JSON this client also
+	// fetches, but archive.org items can contain very large files, and a
+	// flat cap kills a download that's still making perfectly good
+	// progress, just slowly. Transport.ResponseHeaderTimeout keeps the
+	// fail-fast behavior that actually matters — the server never even
+	// starting to respond — without capping how long a large, in-progress
+	// download is allowed to take.
+	transport := http.DefaultTransport
+	if t, ok := transport.(*http.Transport); ok {
+		t = t.Clone()
+		t.ResponseHeaderTimeout = 10 * time.Minute
+		transport = t
+	}
+	client := &http.Client{Transport: transport}
 
 	log.Printf("archiveorg: fetching metadata for %s", identifier)
 	md, err := fetchMetadata(ctx, client, identifier)

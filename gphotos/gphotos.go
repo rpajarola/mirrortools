@@ -1354,7 +1354,24 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 	if err := loadCookies(jar, cookiesPath); err != nil {
 		return fmt.Errorf("loading cookies: %w", err)
 	}
-	client := &http.Client{Jar: jar, Timeout: 60 * time.Second}
+	// http.Client.Timeout caps the entire request, including reading the
+	// response body — fine for the small JSON RPC responses this client
+	// mostly handles, but this same client also downloads original photos
+	// and videos (downloadOriginal, downloadVideoThumbnail,
+	// downloadCompanions), and a large video on a slow connection can
+	// easily take longer than a flat 60s to finish streaming even though
+	// it's making perfectly good progress. Transport.ResponseHeaderTimeout
+	// keeps the fail-fast behavior that actually matters — a broken or
+	// expired session, which shows up as the server never even starting to
+	// respond — without capping how long a genuinely large, in-progress
+	// download is allowed to take.
+	transport := http.DefaultTransport
+	if t, ok := transport.(*http.Transport); ok {
+		t = t.Clone()
+		t.ResponseHeaderTimeout = 60 * time.Second
+		transport = t
+	}
+	client := &http.Client{Jar: jar, Transport: transport}
 	logCookieStatus(client, "cookies loaded from "+cookiesPath)
 
 	gd, err := fetchGlobalData(ctx, client)

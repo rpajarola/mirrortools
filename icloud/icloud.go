@@ -382,6 +382,22 @@ func newClient(appleID, sessionDir string) (*Client, error) {
 	jar := newExportableJar()
 	jar.restore(session.Cookies)
 
+	// http.Client.Timeout caps the entire request, including reading the
+	// response body — fine for the small JSON API calls this client mostly
+	// handles, but it also downloads originals and Live Photo videos
+	// (downloadURL), and a large file on a slow connection can easily take
+	// longer than a flat 5 minutes to finish streaming even though it's
+	// making perfectly good progress. Transport.ResponseHeaderTimeout keeps
+	// the fail-fast behavior that actually matters — the server never even
+	// starting to respond — without capping how long a large, in-progress
+	// download is allowed to take.
+	transport := http.DefaultTransport
+	if t, ok := transport.(*http.Transport); ok {
+		t = t.Clone()
+		t.ResponseHeaderTimeout = 5 * time.Minute
+		transport = t
+	}
+
 	return &Client{
 		appleID:       appleID,
 		setupEndpoint: "https://setup.icloud.com/setup/ws/1",
@@ -389,7 +405,7 @@ func newClient(appleID, sessionDir string) (*Client, error) {
 		authEndpoint:  "https://idmsa.apple.com/appleauth/auth",
 		session:       session,
 		jar:           jar,
-		httpClient:    &http.Client{Jar: jar, Timeout: 5 * time.Minute},
+		httpClient:    &http.Client{Jar: jar, Transport: transport},
 		sessionPath:   sessionPath,
 	}, nil
 }
