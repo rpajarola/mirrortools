@@ -897,20 +897,56 @@ func resolveFilename(destDir, name, mediaKey string, used map[string]bool) (fina
 // that resolveFilename's later runs could mistake for a complete one.
 const tmpSuffix = ".gphotos-tmp"
 
+// videoExtensions lists the file extensions (lowercased, with the leading
+// dot) Google Photos uses for video items. Used only by downloadOriginal to
+// decide which download suffix to request first, and — for a filename this
+// recognizes as a video — to refuse to accept a photo response in its
+// place; see downloadOriginal's comment for why that matters.
+var videoExtensions = map[string]bool{
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".3gp": true,
+	".3g2": true, ".webm": true, ".m4v": true, ".wmv": true, ".mts": true,
+	".m2ts": true,
+}
+
+func isVideoFilename(name string) bool {
+	return videoExtensions[strings.ToLower(filepath.Ext(name))]
+}
+
 func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, filename, destDir string) error {
 	if item.BaseURL == "" {
 		return fmt.Errorf("no base url for %s", item.MediaKey)
 	}
-	// "=d" = original quality photo bytes. Videos need "=dv"; distinguishing
-	// them reliably requires the item's feature-map (see parser.py in gpwc —
-	// LibraryItem.video_duration) which this minimal port skips. As a cheap
-	// fallback, retry with =dv if =d comes back as a non-media content type.
+	// "=d" = original quality photo bytes, "=dv" = original video bytes.
+	// Distinguishing which an item actually is reliably requires its
+	// feature-map (see parser.py in gpwc — LibraryItem.video_duration),
+	// which this minimal port doesn't parse. It used to instead just accept
+	// whichever suffix came back with any image/* or video/* content-type —
+	// but for a genuine video item, "=d" doesn't error or redirect, it
+	// returns 200 with an image/jpeg *thumbnail*, which that loose check
+	// happily accepted, silently saving a thumbnail under the item's real
+	// .mp4 (or similar) filename.
+	//
+	// Fixed by using the item's own filename extension — it comes straight
+	// from Google (via batchFilenames), not guessed — to decide which
+	// suffix to try first, and, when it recognizably names a video, to
+	// require the response actually be video/*: an image/* response (the
+	// thumbnail) is rejected rather than accepted as a fallback, so a
+	// failure to fetch the real video bytes surfaces as a clear "could not
+	// fetch" error instead of silently mis-saving a thumbnail. A filename
+	// extension this doesn't recognize as a video (a photo, or an
+	// unrecognized/absent extension) keeps the original loose either-
+	// content-type behavior, since there's nothing here to know better with.
 	//
 	// Note this only ever returns the cover file. A Pixel RAW+JPEG pair's
 	// RAW/DNG companion isn't reachable this way at all — see
 	// downloadCompanions, which Mirror calls separately (additively, not as
 	// a replacement for this) when -companions is on.
-	for _, suffix := range []string{"=d", "=dv"} {
+	suffixes := []string{"=d", "=dv"}
+	requireVideo := isVideoFilename(filename)
+	if requireVideo {
+		suffixes = []string{"=dv", "=d"}
+	}
+	for _, suffix := range suffixes {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.BaseURL+suffix, nil)
 		if err != nil {
 			return err
@@ -920,7 +956,12 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 			return err
 		}
 		ct := resp.Header.Get("Content-Type")
-		if resp.StatusCode == 200 && (strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")) {
+		isVideo := strings.HasPrefix(ct, "video/")
+		ok := resp.StatusCode == 200 && (isVideo || strings.HasPrefix(ct, "image/"))
+		if ok && requireVideo && !isVideo {
+			ok = false // the thumbnail-instead-of-video case described above
+		}
+		if ok {
 			err := writeAtomically(destDir, filename, resp.Body)
 			resp.Body.Close()
 			return err
@@ -928,6 +969,46 @@ func downloadOriginal(ctx context.Context, c *http.Client, item libraryItem, fil
 		resp.Body.Close()
 	}
 	return fmt.Errorf("could not fetch original bytes for %s", item.MediaKey)
+}
+
+// downloadVideoThumbnail fetches the poster-frame thumbnail Google already
+// renders for a video item — item.BaseURL with no suffix, the same bytes a
+// bare "=d" request used to be mistaken for the video itself (see
+// downloadOriginal) — and saves it alongside videoFilename with its
+// extension replaced by ".jpg". Called for every video, unconditionally: a
+// video file with no way to preview it short of decoding the video itself
+// (most file browsers and galleries won't) is much less useful sitting in a
+// mirror, and there's no local way to produce one for free — extracting a
+// frame would mean shipping an ffmpeg dependency — whereas Google has
+// already rendered exactly this and serves it for the price of one more
+// GET.
+func downloadVideoThumbnail(ctx context.Context, c *http.Client, item libraryItem, videoFilename, destDir string, used map[string]bool) (string, error) {
+	if item.BaseURL == "" {
+		return "", fmt.Errorf("no base url for %s", item.MediaKey)
+	}
+	ext := filepath.Ext(videoFilename)
+	thumbName := strings.TrimSuffix(videoFilename, ext) + ".jpg"
+	fn, alreadyOnDisk := resolveFilename(destDir, thumbName, item.MediaKey, used)
+	if alreadyOnDisk {
+		return fn, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.BaseURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); resp.StatusCode != 200 || !strings.HasPrefix(ct, "image/") {
+		return "", fmt.Errorf("unexpected thumbnail response (status %d, content-type %q)", resp.StatusCode, ct)
+	}
+	if err := writeAtomically(destDir, fn, resp.Body); err != nil {
+		return "", err
+	}
+	return fn, nil
 }
 
 // writeAtomically writes r to destDir/filename via the tmpSuffix
@@ -1391,6 +1472,14 @@ func Mirror(ctx context.Context, source, destDir, cookiesPath, after, before str
 						continue
 					}
 					filenames := []string{fn}
+					if isVideoFilename(fn) {
+						if thumbFn, err := downloadVideoThumbnail(ctx, client, it, fn, destDir, usedNames); err != nil {
+							log.Printf("gphotos:   thumbnail fetch failed for %s: %v", it.MediaKey, err)
+						} else {
+							log.Printf("gphotos:   saved thumbnail %s", thumbFn)
+							filenames = append(filenames, thumbFn)
+						}
+					}
 					if tryCompanions {
 						extra, err := downloadCompanions(ctx, client, gd, it, baseName, subdir, destDir, usedNames)
 						if err != nil {

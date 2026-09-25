@@ -615,6 +615,169 @@ func TestDownloadOriginalWritesViaTempThenRename(t *testing.T) {
 	}
 }
 
+func TestIsVideoFilename(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"VID_20260911.mp4", true},
+		{"clip.MOV", true},
+		{"movie.webm", true},
+		{"IMG_0001.jpg", false},
+		{"IMG_0001.JPG", false},
+		{"noext", false},
+	}
+	for _, c := range cases {
+		if got := isVideoFilename(c.name); got != c.want {
+			t.Errorf("isVideoFilename(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Regression test for the reported bug: a video item's "=d" request returns
+// 200 with an image/jpeg thumbnail — Google doesn't error or redirect, it
+// just serves the thumbnail — while "=dv" returns the real video bytes.
+// downloadOriginal must end up with the video, never the thumbnail, when
+// the item's own filename is recognizably a video.
+func TestDownloadOriginalPrefersVideoOverThumbnailForVideoFilename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "=dv") {
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Write([]byte("real video bytes"))
+			return
+		}
+		// "=d": the thumbnail Google actually returns for a video item.
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("thumbnail bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/video"}
+	if err := downloadOriginal(context.Background(), srv.Client(), item, "VID_20260911.mp4", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "VID_20260911.mp4"))
+	if err != nil || string(got) != "real video bytes" {
+		t.Fatalf("got %q, %v, want the real video bytes, not the thumbnail", got, err)
+	}
+}
+
+// If every suffix only ever returns a thumbnail for a recognized video
+// filename, downloadOriginal must fail loudly rather than silently save the
+// thumbnail under the video's name — the exact failure mode being fixed.
+func TestDownloadOriginalErrorsRatherThanSavingThumbnailForVideo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("thumbnail bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/video"}
+	err := downloadOriginal(context.Background(), srv.Client(), item, "VID_20260911.mp4", dir)
+	if err == nil {
+		t.Fatal("expected an error rather than silently saving the thumbnail as the video")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "VID_20260911.mp4")); !os.IsNotExist(statErr) {
+		t.Fatalf("no file should have been written, stat err = %v", statErr)
+	}
+}
+
+// A photo (or any filename whose extension isn't recognized as a video)
+// keeps the original, looser behavior: whichever suffix returns any
+// image/* or video/* content is accepted.
+func TestDownloadOriginalAcceptsEitherContentTypeForNonVideoFilename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("photo bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/photo"}
+	if err := downloadOriginal(context.Background(), srv.Client(), item, "IMG_0001.jpg", dir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "IMG_0001.jpg"))
+	if err != nil || string(got) != "photo bytes" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestDownloadVideoThumbnailSavesAlongsideVideoAsJPG(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("thumbnail bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/video"}
+	used := map[string]bool{}
+	fn, err := downloadVideoThumbnail(context.Background(), srv.Client(), item, "2026/09/VID_20260911.mp4", dir, used)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026/09/VID_20260911.jpg"; fn != want {
+		t.Errorf("thumbnail filename = %q, want %q", fn, want)
+	}
+	if gotPath != "/video" {
+		t.Errorf("request path = %q, want the bare base URL (no =d/=dv suffix)", gotPath)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(fn)))
+	if err != nil || string(got) != "thumbnail bytes" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if !used[fn] {
+		t.Error("the thumbnail's filename should be recorded in the used map")
+	}
+}
+
+func TestDownloadVideoThumbnailNonImageResponseErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<html>sign in</html>"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/video"}
+	if _, err := downloadVideoThumbnail(context.Background(), srv.Client(), item, "VID_20260911.mp4", dir, map[string]bool{}); err == nil {
+		t.Fatal("expected an error for a non-image response")
+	}
+}
+
+func TestDownloadVideoThumbnailAdoptsExistingFileWithoutRefetching(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("should not be fetched"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "VID_20260911.jpg"), []byte("already here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	item := libraryItem{MediaKey: "mk1", BaseURL: srv.URL + "/video"}
+	fn, err := downloadVideoThumbnail(context.Background(), srv.Client(), item, "VID_20260911.mp4", dir, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fn != "VID_20260911.jpg" {
+		t.Errorf("fn = %q, want VID_20260911.jpg", fn)
+	}
+	if requests != 0 {
+		t.Errorf("expected no HTTP request for an already-present thumbnail, got %d", requests)
+	}
+}
+
 func TestWriteAtomicallyCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	name := filepath.Join("2026", "09", "photo.jpg")

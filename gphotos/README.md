@@ -39,6 +39,12 @@ item was actually taken (in its own local capture time zone, not UTC). A
 `.gphotos-index.json` in `destdir` tracks what's already been mirrored so
 re-running the command only fetches what's new.
 
+Every video also gets its poster-frame thumbnail saved alongside it as
+`<name>.jpg` — there's no local, dependency-free way to produce one (that
+would mean decoding the video, e.g. via `ffmpeg`), and without it a video
+sitting in the mirror has no preview at all in most file browsers or
+galleries.
+
 ## Getting cookies
 
 Whichever route you use, you need to actually be logged into
