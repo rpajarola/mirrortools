@@ -90,9 +90,10 @@ func TestLoadLastUID(t *testing.T) {
 // mail store.
 
 func TestMirrorEndToEnd(t *testing.T) {
-	store := newFakeStore("me@example.com", "hunter2", 12345)
-	store.deliver("first message\r\n")
-	store.deliver("second message\r\n")
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 12345)
+	store.deliver("INBOX", "first message\r\n")
+	store.deliver("INBOX", "second message\r\n")
 
 	addr, cleanup := startFakeIMAPServer(t, store)
 	defer cleanup()
@@ -127,22 +128,22 @@ func TestMirrorEndToEnd(t *testing.T) {
 	// Incremental update: a message delivered after the first run must show
 	// up on a second run, without re-fetching (or re-requesting) the first
 	// two.
-	store.deliver("third message\r\n")
+	store.deliver("INBOX", "third message\r\n")
 	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "INBOX"); err != nil {
 		t.Fatal(err)
 	}
 	checkFile(3, "third message\r\n")
 
-	if got := store.uidsFetched(); !equalUints(got, []imapv2.UID{1, 2, 3}) {
+	if got := store.uidsFetched("INBOX"); !equalUints(got, []imapv2.UID{1, 2, 3}) {
 		t.Errorf("fetched UIDs across both runs = %v, want [1 2 3]", got)
 	}
-	if n := store.fetchRequestCount(); n != 2 {
+	if n := store.fetchRequestCount("INBOX"); n != 2 {
 		t.Errorf("expected exactly 2 FETCH round-trips (one per Mirror call), got %d", n)
 	}
 
 	// A UIDVALIDITY change must force a full re-sync (not delete anything,
 	// just redownload from UID 1 again).
-	store.setUIDValidity(99999)
+	store.setUIDValidity("INBOX", 99999)
 	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "INBOX"); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,8 @@ func TestMirrorEndToEnd(t *testing.T) {
 }
 
 func TestMirrorLoginFailure(t *testing.T) {
-	store := newFakeStore("me@example.com", "hunter2", 1)
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
 	addr, cleanup := startFakeIMAPServer(t, store)
 	defer cleanup()
 
@@ -166,7 +168,8 @@ func TestMirrorLoginFailure(t *testing.T) {
 }
 
 func TestMirrorUnknownMailbox(t *testing.T) {
-	store := newFakeStore("me@example.com", "hunter2", 1)
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
 	addr, cleanup := startFakeIMAPServer(t, store)
 	defer cleanup()
 
@@ -174,6 +177,77 @@ func TestMirrorUnknownMailbox(t *testing.T) {
 	err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", "NoSuchMailbox")
 	if err == nil {
 		t.Fatal("expected an error for a mailbox the server doesn't have")
+	}
+}
+
+// ---- Mirror with no -mailbox: the whole account, folder tree and all ----
+
+func TestMirrorAllFoldersEndToEnd(t *testing.T) {
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
+	store.addMailbox("Archive/2024", 2)
+	// "Archive" itself is a pure hierarchy node (real servers do this, e.g.
+	// Gmail's "[Gmail]"): listed, but \Noselect, so it must never be opened
+	// or get its own marker files — only its selectable child should be.
+	store.addNoSelectFolder("Archive")
+
+	store.deliver("INBOX", "inbox message\r\n")
+	store.deliver("Archive/2024", "archived message\r\n")
+
+	addr, cleanup := startFakeIMAPServer(t, store)
+	defer cleanup()
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	checkFile := func(rel, want string) {
+		t.Helper()
+		got, err := os.ReadFile(filepath.Join(destDir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s: got %q, want %q", rel, got, want)
+		}
+	}
+	checkFile("INBOX/1.eml", "inbox message\r\n")
+	checkFile("Archive/2024/1.eml", "archived message\r\n")
+
+	if _, err := os.Stat(filepath.Join(destDir, "Archive", uidValidityFile)); !os.IsNotExist(err) {
+		t.Errorf("the \\Noselect 'Archive' folder must not have been mirrored itself, stat err = %v", err)
+	}
+
+	// Incremental: a new message in one folder must show up on a second
+	// run, without disturbing the other folder.
+	store.deliver("Archive/2024", "second archived message\r\n")
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", ""); err != nil {
+		t.Fatal(err)
+	}
+	checkFile("Archive/2024/2.eml", "second archived message\r\n")
+	if n := store.fetchRequestCount("INBOX"); n != 2 {
+		t.Errorf("INBOX should have been visited on both runs, got %d fetch round-trips", n)
+	}
+}
+
+func TestMirrorAllFoldersContinuesPastOneFolderFailure(t *testing.T) {
+	store := newFakeStore("me@example.com", "hunter2")
+	store.addMailbox("INBOX", 1)
+	store.addMailbox("Broken", 1)
+	store.deliver("INBOX", "still works\r\n")
+	store.breakMailbox("Broken") // Select on this one always errors
+
+	addr, cleanup := startFakeIMAPServer(t, store)
+	defer cleanup()
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), addr, destDir, "me@example.com", "hunter2", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(destDir, "INBOX", "1.eml"))
+	if err != nil || string(got) != "still works\r\n" {
+		t.Fatalf("INBOX should still have been mirrored despite Broken failing: got %q, %v", got, err)
 	}
 }
 
@@ -191,60 +265,89 @@ func equalUints(a, b []imapv2.UID) bool {
 }
 
 // ---- fakeStore: the shared, in-memory backing store for every session the
-// fake server hands out. One store == one mailbox ("INBOX"). ----
+// fake server hands out. Models a whole account: any number of mailboxes,
+// plus \Noselect pure hierarchy folders that carry no messages of their
+// own. ----
 
 type fakeMessage struct {
 	uid  imapv2.UID
 	body []byte
 }
 
-type fakeStore struct {
-	mu          sync.Mutex
-	user, pass  string
+type fakeMailbox struct {
 	uidValidity uint32
 	nextUID     imapv2.UID
 	messages    []fakeMessage
 	fetched     []imapv2.UID
 	fetchCalls  int
+	broken      bool // Select always fails, simulating a server-side error
 }
 
-func newFakeStore(user, pass string, uidValidity uint32) *fakeStore {
-	return &fakeStore{user: user, pass: pass, uidValidity: uidValidity, nextUID: 1}
+type fakeStore struct {
+	mu              sync.Mutex
+	user, pass      string
+	delim           rune
+	mailboxes       map[string]*fakeMailbox
+	noSelectFolders []string
 }
 
-func (s *fakeStore) deliver(body string) imapv2.UID {
+func newFakeStore(user, pass string) *fakeStore {
+	return &fakeStore{user: user, pass: pass, delim: '/', mailboxes: map[string]*fakeMailbox{}}
+}
+
+func (s *fakeStore) addMailbox(name string, uidValidity uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	uid := s.nextUID
-	s.nextUID++
-	s.messages = append(s.messages, fakeMessage{uid: uid, body: []byte(body)})
+	s.mailboxes[name] = &fakeMailbox{uidValidity: uidValidity, nextUID: 1}
+}
+
+func (s *fakeStore) addNoSelectFolder(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noSelectFolders = append(s.noSelectFolders, name)
+}
+
+func (s *fakeStore) breakMailbox(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mailboxes[name].broken = true
+}
+
+func (s *fakeStore) deliver(mailbox, body string) imapv2.UID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mb := s.mailboxes[mailbox]
+	uid := mb.nextUID
+	mb.nextUID++
+	mb.messages = append(mb.messages, fakeMessage{uid: uid, body: []byte(body)})
 	return uid
 }
 
-func (s *fakeStore) setUIDValidity(v uint32) {
+func (s *fakeStore) setUIDValidity(mailbox string, v uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.uidValidity = v
+	s.mailboxes[mailbox].uidValidity = v
 }
 
-func (s *fakeStore) uidsFetched() []imapv2.UID {
+func (s *fakeStore) uidsFetched(mailbox string) []imapv2.UID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]imapv2.UID(nil), s.fetched...)
+	return append([]imapv2.UID(nil), s.mailboxes[mailbox].fetched...)
 }
 
-func (s *fakeStore) fetchRequestCount() int {
+func (s *fakeStore) fetchRequestCount(mailbox string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.fetchCalls
+	return s.mailboxes[mailbox].fetchCalls
 }
 
 // ---- fakeSession: one client connection's view onto a fakeStore.
-// Implements imapserver.Session; only Login/Select/Fetch do anything real,
-// everything else the test client never calls. ----
+// Implements imapserver.Session; only Login/List/Select/Fetch do anything
+// real, everything else the test client never calls. ----
 
 type fakeSession struct {
-	store *fakeStore
+	store    *fakeStore
+	selected string // set by Select; Fetch operates on this mailbox
 }
 
 func (s *fakeSession) Close() error { return nil }
@@ -258,16 +361,45 @@ func (s *fakeSession) Login(username, password string) error {
 	return nil
 }
 
-func (s *fakeSession) Select(mailbox string, options *imapv2.SelectOptions) (*imapv2.SelectData, error) {
-	if mailbox != "INBOX" {
-		return nil, fmt.Errorf("no such mailbox %q", mailbox)
+func (s *fakeSession) List(w *imapserver.ListWriter, ref string, patterns []string, options *imapv2.ListOptions) error {
+	s.store.mu.Lock()
+	names := make([]string, 0, len(s.store.mailboxes))
+	for name := range s.store.mailboxes {
+		names = append(names, name)
 	}
+	noSelect := append([]string(nil), s.store.noSelectFolders...)
+	delim := s.store.delim
+	s.store.mu.Unlock()
+	sort.Strings(names)
+
+	for _, name := range noSelect {
+		if err := w.WriteList(&imapv2.ListData{Mailbox: name, Delim: delim, Attrs: []imapv2.MailboxAttr{imapv2.MailboxAttrNoSelect}}); err != nil {
+			return err
+		}
+	}
+	for _, name := range names {
+		if err := w.WriteList(&imapv2.ListData{Mailbox: name, Delim: delim}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *fakeSession) Select(mailbox string, options *imapv2.SelectOptions) (*imapv2.SelectData, error) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	mb, ok := s.store.mailboxes[mailbox]
+	if !ok {
+		return nil, fmt.Errorf("no such mailbox %q", mailbox)
+	}
+	if mb.broken {
+		return nil, fmt.Errorf("simulated server error selecting %q", mailbox)
+	}
+	s.selected = mailbox
 	return &imapv2.SelectData{
-		NumMessages: uint32(len(s.store.messages)),
-		UIDValidity: s.store.uidValidity,
-		UIDNext:     s.store.nextUID,
+		NumMessages: uint32(len(mb.messages)),
+		UIDValidity: mb.uidValidity,
+		UIDNext:     mb.nextUID,
 	}, nil
 }
 
@@ -278,8 +410,9 @@ func (s *fakeSession) Fetch(w *imapserver.FetchWriter, numSet imapv2.NumSet, opt
 	}
 
 	s.store.mu.Lock()
-	msgs := append([]fakeMessage(nil), s.store.messages...)
-	s.store.fetchCalls++
+	mb := s.store.mailboxes[s.selected]
+	msgs := append([]fakeMessage(nil), mb.messages...)
+	mb.fetchCalls++
 	s.store.mu.Unlock()
 
 	for i, m := range msgs {
@@ -287,7 +420,7 @@ func (s *fakeSession) Fetch(w *imapserver.FetchWriter, numSet imapv2.NumSet, opt
 			continue
 		}
 		s.store.mu.Lock()
-		s.store.fetched = append(s.store.fetched, m.uid)
+		mb.fetched = append(mb.fetched, m.uid)
 		s.store.mu.Unlock()
 
 		rw := w.CreateMessage(uint32(i + 1))
@@ -319,9 +452,6 @@ func (s *fakeSession) Rename(string, string, *imapv2.RenameOptions) error {
 }
 func (s *fakeSession) Subscribe(string) error   { return errNotImplemented }
 func (s *fakeSession) Unsubscribe(string) error { return errNotImplemented }
-func (s *fakeSession) List(*imapserver.ListWriter, string, []string, *imapv2.ListOptions) error {
-	return errNotImplemented
-}
 func (s *fakeSession) Status(string, *imapv2.StatusOptions) (*imapv2.StatusData, error) {
 	return nil, errNotImplemented
 }

@@ -1,33 +1,49 @@
-// Package imap mirrors an IMAP mailbox (an inbox, by default) to a local
-// directory using github.com/emersion/go-imap/v2, a pure-Go IMAP client —
-// no external `imapsync`/`fetchmail`-style tool required.
+// Package imap mirrors an IMAP mailbox, or an entire account's folder tree,
+// to a local directory using github.com/emersion/go-imap/v2, a pure-Go IMAP
+// client — no external `imapsync`/`fetchmail`-style tool required.
 //
 // It registers itself as the "imap" method with mirrortools' mirror
 // package, so it's normally driven through the mirror CLI:
 //
 //	mirror imap -user me@example.com -password-file pw.txt imap.example.com ./mail
+//	mirror imap -user me@example.com -password-file pw.txt -mailbox Archive imap.example.com ./mail
 //
-// Each message is saved as destDir/<uid>.eml, its raw RFC 822 form — nothing
-// is parsed or reformatted, so the file is exactly what a real mail client
-// would show, and can be fed to any tool that reads .eml files.
+// With no -mailbox flag, the whole account is mirrored: every folder the
+// server lists, laid out under destDir in the same hierarchy the server
+// reports (using its own delimiter, e.g. "/" or "."), each folder's messages
+// landing in its own subdirectory — so destDir/INBOX holds the inbox,
+// destDir/Archive/2024 holds a folder nested under "Archive", and so on. A
+// folder the server marks \Noselect (a pure hierarchy node with no messages
+// of its own, e.g. a "[Gmail]" grouping folder) is skipped; its selectable
+// children are still mirrored into their own subdirectories. A single
+// folder's failure — a permissions error, a transient server error — is
+// logged and skipped rather than aborting the rest of the account, unless
+// every folder fails. Passing -mailbox restricts this to exactly one folder,
+// mirrored directly into destDir (no subdirectory), same as earlier versions
+// of this tool always did.
 //
-// The mailbox is opened read-only (EXAMINE, not SELECT) and every fetch uses
-// IMAP's PEEK option, so mirroring a mailbox never marks its messages as
-// read or otherwise changes anything on the server — a mirror is a pure
-// read operation.
+// Each message is saved as <folder-dir>/<uid>.eml, its raw RFC 822 form —
+// nothing is parsed or reformatted, so the file is exactly what a real mail
+// client would show, and can be fed to any tool that reads .eml files.
 //
-// Incremental updates are UID-based, not a full re-listing: destDir/.last-uid
-// records the highest UID mirrored so far, and each run asks the server only
-// for UIDs above that (a single UID FETCH <last+1>:* — cheap even against a
-// huge mailbox, since it costs nothing proportional to how many messages
-// were already mirrored). destDir/.uidvalidity records the mailbox's
-// UIDVALIDITY; if the server reports a different one on a later run — it's
-// entitled to, e.g. after certain kinds of mailbox reorganization — UIDs
-// from before aren't guaranteed to mean the same messages any more, so
-// mirroring starts over from UID 1. This never deletes anything already on
-// disk, so a UIDVALIDITY change costs a redundant re-download rather than
-// losing data; already-present files are still skipped via the usual
-// exists-on-disk check.
+// Every mailbox is opened read-only (EXAMINE, not SELECT) and every fetch
+// uses IMAP's PEEK option, so mirroring never marks messages as read or
+// otherwise changes anything on the server — a mirror is a pure read
+// operation.
+//
+// Incremental updates are UID-based, not a full re-listing, and tracked per
+// folder: <folder-dir>/.last-uid records the highest UID mirrored so far in
+// that folder, and each run asks the server only for UIDs above that (a
+// single UID FETCH <last+1>:* — cheap even against a huge mailbox, since it
+// costs nothing proportional to how many messages were already mirrored).
+// <folder-dir>/.uidvalidity records the folder's UIDVALIDITY; if the server
+// reports a different one on a later run — it's entitled to, e.g. after
+// certain kinds of mailbox reorganization — UIDs from before aren't
+// guaranteed to mean the same messages any more, so that folder's mirroring
+// starts over from UID 1. This never deletes anything already on disk, so a
+// UIDVALIDITY change costs a redundant re-download rather than losing data;
+// already-present files are still skipped via the usual exists-on-disk
+// check.
 package imap
 
 import (
@@ -53,12 +69,12 @@ func init() {
 	mirror.Register(&mirror.Method{
 		Name:     "imap",
 		Source:   "an IMAP server: host or host:port (always implicit TLS; port defaults to 993)",
-		Describe: "mirror an IMAP mailbox (INBOX by default) into destDir as one .eml file per message",
+		Describe: "mirror an IMAP account into destDir as one .eml file per message, one subdirectory per folder",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			user := fs.String("user", "", "IMAP account username (required)")
 			passwordFile := fs.String("password-file", "", "path to a file containing the account's password, "+
 				"one line — kept out of the command line and shell history (required)")
-			mailbox := fs.String("mailbox", "INBOX", "mailbox to mirror")
+			mailbox := fs.String("mailbox", "", "mailbox to mirror; if unset, every folder in the account is mirrored")
 			return func(ctx context.Context, source, destDir string) error {
 				if *user == "" {
 					return fmt.Errorf("-user is required")
@@ -102,11 +118,12 @@ const (
 	lastUIDFile     = ".last-uid"
 )
 
-// Mirror downloads every message of mailbox on the IMAP server named by
-// source, from the one after the last UID a previous run mirrored (or from
-// the beginning, on a first run or after a UIDVALIDITY change) into destDir,
-// which the caller guarantees exists. See the package doc comment for the
-// on-disk layout and the incremental-update strategy.
+// Mirror connects to the IMAP server named by source and mirrors either one
+// mailbox (if mailbox is non-empty), directly into destDir, or, if mailbox
+// is empty, every folder the account has, each into its own subdirectory of
+// destDir. destDir is guaranteed to already exist by the caller. See the
+// package doc comment for the on-disk layout and the incremental-update
+// strategy.
 func Mirror(ctx context.Context, source, destDir, user, password, mailbox string) error {
 	addr := source
 	if _, _, err := net.SplitHostPort(addr); err != nil {
@@ -151,18 +168,108 @@ func Mirror(ctx context.Context, source, destDir, user, password, mailbox string
 	// a closure defers Logout() itself too.
 	defer func() { client.Logout().Wait() }()
 
-	selectData, err := client.Select(mailbox, &imapv2.SelectOptions{ReadOnly: true}).Wait()
+	if mailbox != "" {
+		if err := mirrorMailbox(client, mailbox, destDir); err != nil {
+			return fmt.Errorf("imap: %w", err)
+		}
+		return nil
+	}
+	return mirrorAllMailboxes(client, destDir)
+}
+
+// mirrorAllMailboxes lists every folder the account has and mirrors each
+// selectable one into its own subdirectory of destDir, named after the
+// folder's own hierarchy (see the package doc comment). A single folder's
+// error is logged and skipped, same as one item failing elsewhere in
+// mirrortools (e.g. groupsio's directory walk) — one bad folder shouldn't
+// cost everything else already mirrored — except that if every folder
+// fails, that's surfaced as an error rather than silently doing nothing.
+func mirrorAllMailboxes(client *imapclient.Client, destDir string) error {
+	mailboxes, err := client.List("", "*", nil).Collect()
 	if err != nil {
-		return fmt.Errorf("imap: opening mailbox %q: %w", mailbox, err)
+		return fmt.Errorf("imap: listing folders: %w", err)
 	}
 
-	lastUID, err := loadLastUID(destDir, selectData.UIDValidity)
+	log.Printf("imap: mirroring %d folder(s) into %s", len(mailboxes), destDir)
+
+	var mirrored, failed int
+	for _, mb := range mailboxes {
+		if hasAttr(mb.Attrs, imapv2.MailboxAttrNoSelect) {
+			continue
+		}
+		dir, err := mailboxDir(destDir, mb.Mailbox, mb.Delim)
+		if err != nil {
+			log.Printf("imap: %s: %v", mb.Mailbox, err)
+			failed++
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("imap: %s: creating %s: %v", mb.Mailbox, dir, err)
+			failed++
+			continue
+		}
+		if err := mirrorMailbox(client, mb.Mailbox, dir); err != nil {
+			log.Printf("imap: %s: %v", mb.Mailbox, err)
+			failed++
+			continue
+		}
+		mirrored++
+	}
+
+	log.Printf("imap: done: %d folder(s) mirrored, %d failed", mirrored, failed)
+	if mirrored == 0 && failed > 0 {
+		return fmt.Errorf("imap: all %d folder(s) failed", failed)
+	}
+	return nil
+}
+
+// hasAttr reports whether attrs contains want.
+func hasAttr(attrs []imapv2.MailboxAttr, want imapv2.MailboxAttr) bool {
+	for _, a := range attrs {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// mailboxDir resolves an IMAP mailbox's full name to the local directory it
+// mirrors into, splitting on the server's own hierarchy delimiter (0 if the
+// server doesn't use one, in which case the whole name is a single
+// segment). Rejects a name that would escape destDir once joined onto it —
+// defensive only, real IMAP folder names aren't expected to ever trip this
+// — the same posture as safeRelPath in mirrortools' other backends.
+func mailboxDir(destDir, mailboxName string, delim rune) (string, error) {
+	segs := []string{mailboxName}
+	if delim != 0 {
+		segs = strings.Split(mailboxName, string(delim))
+	}
+	dir := destDir
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return "", fmt.Errorf("unsafe folder name %q", mailboxName)
+		}
+		dir = filepath.Join(dir, s)
+	}
+	return dir, nil
+}
+
+// mirrorMailbox downloads every message of mailbox, from the one after the
+// last UID a previous run mirrored (or from the beginning, on a first run or
+// after a UIDVALIDITY change) into dir, which is created if needed.
+func mirrorMailbox(client *imapclient.Client, mailbox, dir string) error {
+	selectData, err := client.Select(mailbox, &imapv2.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
-		return fmt.Errorf("imap: %w", err)
+		return fmt.Errorf("opening mailbox %q: %w", mailbox, err)
+	}
+
+	lastUID, err := loadLastUID(dir, selectData.UIDValidity)
+	if err != nil {
+		return err
 	}
 
 	log.Printf("imap: mirroring %s (%d messages, UIDVALIDITY %d) into %s, from UID %d",
-		mailbox, selectData.NumMessages, selectData.UIDValidity, destDir, lastUID+1)
+		mailbox, selectData.NumMessages, selectData.UIDValidity, dir, lastUID+1)
 
 	var uidSet imapv2.UIDSet
 	uidSet.AddRange(imapv2.UID(lastUID+1), 0) // 0 means "*", i.e. no upper bound
@@ -180,10 +287,10 @@ func Mirror(ctx context.Context, source, destDir, user, password, mailbox string
 		if msg == nil {
 			break
 		}
-		uid, wasSkipped, err := writeMessage(msg, destDir)
+		uid, wasSkipped, err := writeMessage(msg, dir)
 		if err != nil {
 			cmd.Close()
-			return fmt.Errorf("imap: writing message UID %d: %w", uid, err)
+			return fmt.Errorf("writing message UID %d: %w", uid, err)
 		}
 		if uint32(uid) > maxUID {
 			maxUID = uint32(uid)
@@ -195,14 +302,14 @@ func Mirror(ctx context.Context, source, destDir, user, password, mailbox string
 		}
 	}
 	if err := cmd.Close(); err != nil {
-		return fmt.Errorf("imap: fetch: %w", err)
+		return fmt.Errorf("fetch: %w", err)
 	}
 
-	if err := writeMarkers(destDir, selectData.UIDValidity, maxUID); err != nil {
-		return fmt.Errorf("imap: %w", err)
+	if err := writeMarkers(dir, selectData.UIDValidity, maxUID); err != nil {
+		return err
 	}
 
-	log.Printf("imap: done: %d downloaded, %d already present, highest UID %d", downloaded, skipped, maxUID)
+	log.Printf("imap: %s: done: %d downloaded, %d already present, highest UID %d", mailbox, downloaded, skipped, maxUID)
 	return nil
 }
 
