@@ -38,6 +38,13 @@ immediately, no marker is written, and a subsequent run resumes rather than
 silently reporting success. Files already on disk at their expected size are
 skipped without re-fetching.
 
+After all files are in place, each file's modification time is set to the
+`<mtime>` its entry in the item's `<id>_files.xml` declares — when it was
+last modified on archive.org, not when it was downloaded. This also applies
+to files already on disk, so re-running with `-f` fixes up the mtimes of an
+item mirrored before this was supported. Entries without an `<mtime>` are
+left alone.
+
 One file is exempt from checksum verification: an item's own
 `<id>_files.xml` lists every file's checksum including its own `<file>`
 entry, whose md5 was necessarily computed before that self-referential entry

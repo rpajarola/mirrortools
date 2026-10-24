@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---- ParseIdentifier ----
@@ -434,6 +435,99 @@ func TestMirrorFailedDownloadReturnsErrorWithoutDoneMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "test-item", doneFileName)); !os.IsNotExist(err) {
 		t.Errorf("a failed mirror must not leave a .done marker, stat err = %v", err)
+	}
+}
+
+// ---- applyMTimes / Mirror mtimes ----
+
+func TestApplyMTimes(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{"a.txt", filepath.Join("sub", "b.txt"), "nomtime.txt"} {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	xmlPath := filepath.Join(dir, "item_files.xml")
+	if err := os.WriteFile(xmlPath, []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<files>
+  <file name="a.txt" source="original"><mtime>1234567890</mtime><size>1</size></file>
+  <file name="sub/b.txt" source="original"><mtime>1500000000</mtime></file>
+  <file name="nomtime.txt" source="metadata"><size>1</size></file>
+  <file name="not-on-disk.txt" source="original"><mtime>1600000000</mtime></file>
+</files>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(filepath.Join(dir, "nomtime.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyMTimes(dir, xmlPath); err != nil {
+		t.Fatal(err)
+	}
+
+	checkMTime := func(rel string, want time.Time) {
+		t.Helper()
+		fi, err := os.Stat(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.ModTime().Equal(want) {
+			t.Errorf("%s: mtime = %v, want %v", rel, fi.ModTime(), want)
+		}
+	}
+	checkMTime("a.txt", time.Unix(1234567890, 0))
+	checkMTime(filepath.Join("sub", "b.txt"), time.Unix(1500000000, 0))
+	checkMTime("nomtime.txt", before.ModTime())
+}
+
+func TestApplyMTimesMissingFilesXMLIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := applyMTimes(dir, filepath.Join(dir, "missing_files.xml")); err != nil {
+		t.Fatalf("a missing _files.xml should not be an error: %v", err)
+	}
+}
+
+func TestApplyMTimesRejectsPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	xmlPath := filepath.Join(dir, "item_files.xml")
+	if err := os.WriteFile(xmlPath, []byte(`<files><file name="../evil.txt"><mtime>1</mtime></file></files>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyMTimes(dir, xmlPath); err == nil {
+		t.Fatal("expected an error for a file name that escapes the item directory")
+	}
+}
+
+func TestMirrorSetsMTimesFromFilesXML(t *testing.T) {
+	const identifier = "test-item"
+	fs := newFakeServer()
+	filesXML := `<files><file name="a.txt" source="original"><mtime>1234567890</mtime></file></files>`
+	fs.md = metadata{Files: []metaFile{
+		{Name: "a.txt", Size: "5"},
+		{Name: identifier + "_files.xml"},
+	}}
+	fs.setFile("a.txt", "hello")
+	fs.setFile(identifier+"_files.xml", filesXML)
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), identifier, destDir, false); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(destDir, identifier, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Unix(1234567890, 0); !fi.ModTime().Equal(want) {
+		t.Errorf("mtime = %v, want %v", fi.ModTime(), want)
 	}
 }
 

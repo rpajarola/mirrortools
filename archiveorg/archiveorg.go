@@ -17,6 +17,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -203,6 +204,52 @@ func downloadFile(ctx context.Context, c *http.Client, srcURL, finalPath, wantMD
 	return os.Rename(tmpPath, finalPath)
 }
 
+// filesXML is the subset of an item's <id>_files.xml this cares about.
+type filesXML struct {
+	Files []struct {
+		Name  string `xml:"name,attr"`
+		MTime string `xml:"mtime"`
+	} `xml:"file"`
+}
+
+// applyMTimes sets each file's mtime under itemDir to the <mtime> (Unix
+// seconds) its entry in filesXMLPath declares, i.e. the time the file was
+// last modified on archive.org rather than the time this run downloaded
+// it. Entries without an mtime (archive.org omits it for some of its own
+// generated files) or whose file isn't on disk are skipped. A missing
+// _files.xml is not an error: there's simply nothing to apply.
+func applyMTimes(itemDir, filesXMLPath string) error {
+	data, err := os.ReadFile(filesXMLPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var fx filesXML
+	if err := xml.Unmarshal(data, &fx); err != nil {
+		return fmt.Errorf("parsing %s: %w", filesXMLPath, err)
+	}
+	for _, f := range fx.Files {
+		if f.Name == "" || f.MTime == "" {
+			continue
+		}
+		secs, err := strconv.ParseFloat(strings.TrimSpace(f.MTime), 64)
+		if err != nil {
+			return fmt.Errorf("%s: bad mtime %q: %w", f.Name, f.MTime, err)
+		}
+		relPath, err := safeRelPath(itemDir, f.Name)
+		if err != nil {
+			return err
+		}
+		mtime := time.Unix(int64(secs), 0)
+		if err := os.Chtimes(filepath.Join(itemDir, relPath), mtime, mtime); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // Mirror downloads every file listed in the archive.org item identified by
 // source (a details/download URL, or a bare identifier) into destDir, which
 // the caller guarantees exists.
@@ -210,6 +257,10 @@ func downloadFile(ctx context.Context, c *http.Client, srcURL, finalPath, wantMD
 // Each item is mirrored into its own destDir/<identifier> subdirectory
 // (created if needed), so one destDir can hold several mirrored items
 // side by side without their files colliding.
+//
+// Once every file is in place, each one's mtime is set from the item's
+// <identifier>_files.xml listing (see applyMTimes), including files that
+// were already on disk from an earlier run.
 //
 // A <destDir>/<identifier>/.done marker from a prior fully-successful run
 // causes an immediate, silent skip unless force is set. Mirror only ever
@@ -303,6 +354,10 @@ func Mirror(ctx context.Context, source, destDir string, force bool) error {
 			return fmt.Errorf("downloading %s: %w", f.Name, err)
 		}
 		downloaded++
+	}
+
+	if err := applyMTimes(itemDir, filepath.Join(itemDir, identifier+"_files.xml")); err != nil {
+		return fmt.Errorf("%s: setting mtimes: %w", identifier, err)
 	}
 
 	if err := os.WriteFile(donePath, []byte("DONE"), 0o644); err != nil {
