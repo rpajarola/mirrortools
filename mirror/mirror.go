@@ -12,7 +12,9 @@ package mirror
 import (
 	"context"
 	"flag"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Func mirrors everything reachable from source into destDir, which the
@@ -36,6 +38,23 @@ type Method struct {
 	// values through the pointers fs.String/fs.Bool/etc. returned, not by
 	// closing over them directly.
 	SetupFlags func(fs *flag.FlagSet) Func
+
+	// Match reports whether source is something this method mirrors, so
+	// the CLI can pick the method itself when the user doesn't name one.
+	// Nil means the method is only used when named, e.g. because its
+	// sources (an email address) look the same as another method's.
+	Match func(source string) bool
+	// Fallback marks a Match as generic: the method is picked only when no
+	// other method's Match accepts the source, as http is for URLs that
+	// a more specific method, such as archiveorg, doesn't claim.
+	Fallback bool
+	// Subdir, if set, names the subdirectory a source is mirrored into
+	// when the destination is the CLI's shared default directory rather
+	// than one the user gave. Methods that already mirror into a
+	// subdirectory of their own, such as <destDir>/<host>/..., leave it
+	// nil; methods that fill destDir directly set it, so that different
+	// sources don't end up mixed together.
+	Subdir func(source string) string
 }
 
 var registry = map[string]*Method{}
@@ -61,6 +80,26 @@ func Get(name string) (*Method, bool) {
 	return m, ok
 }
 
+// Detect picks the method for source among those with a Match: a
+// specific method if one matches, else a Fallback one. If several
+// match at the same level, the first by name wins.
+func Detect(source string) (*Method, bool) {
+	var fallback *Method
+	for _, name := range Names() {
+		m := registry[name]
+		if m.Match == nil || !m.Match(source) {
+			continue
+		}
+		if !m.Fallback {
+			return m, true
+		}
+		if fallback == nil {
+			fallback = m
+		}
+	}
+	return fallback, fallback != nil
+}
+
 // Names returns all registered method names, sorted alphabetically.
 func Names() []string {
 	names := make([]string, 0, len(registry))
@@ -69,4 +108,15 @@ func Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// SafeName joins method and an identifier from a source, such as an
+// account or host name, into a relative path for a Subdir, keeping the
+// identifier a single path element.
+func SafeName(method, id string) string {
+	id = strings.NewReplacer("/", "_", "\\", "_").Replace(id)
+	if id == "" || id == "." || id == ".." {
+		id = "_"
+	}
+	return filepath.Join(method, id)
 }

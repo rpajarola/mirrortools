@@ -55,13 +55,22 @@ in its `init()`, then blank-importing it from `cmd/mirror/main.go`.
 ## Usage
 
 ```
-go run ./cmd/mirror <method> [flags] <source> <destdir>
+mirror [<method>] [flags] <source> [<destdir>]
 ```
+
+(or `go run ./cmd/mirror ...` from a checkout).
+
+The method can be left out when the source says what it is:
+`https://archive.org/details/...` goes to `archiveorg`,
+`https://groups.io/g/...` to `groupsio`, `ftp://` and `ftps://` to `ftp`,
+`gopher://` to `gopher`, `rsync://` and `host::module` to `rsync`, and any
+other `http://` or `https://` URL to `http`. The destination can be left
+out when the config file names a default one.
 
 For example, to mirror a Google Photos account:
 
 ```
-go run ./cmd/mirror gphotos -cookies cookies.txt someone@gmail.com ./photos
+mirror gphotos -cookies cookies.txt someone@gmail.com ./photos
 ```
 
 Or to mirror an Internet Archive item (this lands in `./archive/some-item`,
@@ -69,32 +78,65 @@ since archiveorg mirrors each item into its own `<destdir>/<id>`
 subdirectory):
 
 ```
-go run ./cmd/mirror archiveorg https://archive.org/details/some-item ./archive
+mirror https://archive.org/details/some-item ./archive
 ```
 
 Or to mirror a Gopher menu tree:
 
 ```
-go run ./cmd/mirror gopher gopher://gopher.floodgap.com/1/gopher/toybox ./mirror
+mirror gopher://gopher.floodgap.com/1/gopher/toybox ./mirror
 ```
 
 Or to mirror everything under a path of a web server:
 
 ```
-go run ./cmd/mirror http https://ftp.gnu.org/gnu/hello/ ./mirror
+mirror https://ftp.gnu.org/gnu/hello/ ./mirror
 ```
 
 Or to mirror a directory tree of an FTP server:
 
 ```
-go run ./cmd/mirror ftp ftp://ftp.gnu.org/gnu/hello/ ./mirror
+mirror ftp://ftp.gnu.org/gnu/hello/ ./mirror
 ```
 
 Or to mirror a groups.io group's Files section:
 
 ```
-go run ./cmd/mirror groupsio -email you@example.com -password-file pw.txt some-group ./mirror
+mirror -email you@example.com -password-file pw.txt https://groups.io/g/some-group ./mirror
 ```
 
-Run `go run ./cmd/mirror` for the list of available methods, or
-`go run ./cmd/mirror <method> -h` for a method's flags.
+Run `mirror -h` for the list of available methods, or `mirror <method> -h`
+for a method's flags.
+
+### Config file
+
+`~/.config/mirrortools/config.toml` (or `$XDG_CONFIG_HOME/mirrortools/config.toml`,
+or whatever `$MIRROR_CONFIG` names) sets a default destination, and
+defaults for each method's flags, in [TOML](https://toml.io):
+
+```toml
+# Where to mirror when no <destdir> is given.
+destdir = "~/mirror"
+
+# A section per method: default values for its flags (without the "-"),
+# and optionally a destdir of its own.
+[groupsio]
+email = "you@example.com"
+password-file = "~/.config/mirrortools/groupsio-password"
+
+[http]
+wait = "1s"
+
+[gphotos]
+destdir = "~/Pictures/Google Photos"
+cookies = "~/.config/mirrortools/gphotos-cookies.txt"
+```
+
+Flags on the command line override the config file. A leading `~/` in a
+value is the home directory.
+
+Most methods already put each source in a subdirectory of its own, such as
+`<destdir>/<host>/<path>` or `<destdir>/<item>`, so they can all share the
+default destination. The others get one when they use it: `gphotos/<account>`,
+`icloud/<apple id>`, `imap/<host>`, and `<host>/<path>` for `rsync`. A
+method's own `destdir`, or one given on the command line, is used as it is.

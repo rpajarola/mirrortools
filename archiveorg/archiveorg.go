@@ -45,6 +45,7 @@ func init() {
 				return Mirror(ctx, source, destDir, *force)
 			}
 		},
+		Match: func(source string) bool { return itemURLRe.MatchString(source) },
 	})
 }
 
@@ -58,7 +59,11 @@ const doneFileName = ".done"
 // download URL, or matches a bare identifier outright. Mirrors the parsing
 // the Python script this replaces did: strip a recognized URL prefix if
 // present, then take everything up to the next "/".
-var identifierRe = regexp.MustCompile(`^(?:https?://archive\.org/(?:details|download)/)?([^/]+)(?:/.*)?$`)
+var identifierRe = regexp.MustCompile(`^(?:https?://(?:www\.)?archive\.org/(?:details|download)/)?([^/]+)(?:/.*)?$`)
+
+// itemURLRe matches the item URLs the mirror CLI hands to this method
+// without being told to; a bare identifier could be anything.
+var itemURLRe = regexp.MustCompile(`^https?://(?:www\.)?archive\.org/(?:details|download)/[^/]+`)
 
 // ParseIdentifier extracts the archive.org item identifier from a
 // details/download URL or a bare identifier, rejecting anything that still

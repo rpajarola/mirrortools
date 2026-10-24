@@ -66,6 +66,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -75,8 +76,8 @@ import (
 func init() {
 	mirror.Register(&mirror.Method{
 		Name: "groupsio",
-		Source: "a groups.io group's short name — the \"xyz\" in https://groups.io/g/xyz — " +
-			"whose Files section is mirrored",
+		Source: "a groups.io group, whose Files section is mirrored: its URL, " +
+			"https://groups.io/g/xyz, or just its short name xyz",
 		Describe: "download every file in a groups.io group's Files section via the groups.io API",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			email := fs.String("email", "", "groups.io account email (required)")
@@ -97,10 +98,27 @@ func init() {
 				return Mirror(ctx, source, destDir, *email, password)
 			}
 		},
+		Match: func(source string) bool { return groupURLRe.MatchString(source) },
 	})
 }
 
 const apiBase = "https://groups.io/api/v1"
+
+// groupURLRe matches a group's web URL, https://groups.io/g/<name>, or any
+// page under it, capturing the name.
+var groupURLRe = regexp.MustCompile(`^https?://(?:www\.)?groups\.io/g/([^/?#]+)`)
+
+// ParseGroup returns the group's short name from its web URL (or any page
+// under it), or source itself if it is already a bare name.
+func ParseGroup(source string) (string, error) {
+	if m := groupURLRe.FindStringSubmatch(source); m != nil {
+		return m[1], nil
+	}
+	if source == "" || strings.ContainsAny(source, ":/") {
+		return "", fmt.Errorf("not a groups.io group: %q", source)
+	}
+	return source, nil
+}
 
 // tmpSuffix marks a file as a download in progress, the same
 // write-then-rename convention used elsewhere in mirrortools: a download
@@ -195,7 +213,10 @@ type groupResponse struct {
 // (which always writes via a temp file, so its own interruptions never
 // leave a wrong-sized file behind).
 func Mirror(ctx context.Context, source, destDir, email, password string) error {
-	groupName := source
+	groupName, err := ParseGroup(source)
+	if err != nil {
+		return err
+	}
 	jar, _ := cookiejar.New(nil)
 	c := &client{
 		http:      &http.Client{Jar: jar, Timeout: 60 * time.Second},

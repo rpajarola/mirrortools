@@ -18,7 +18,9 @@ go run ./cmd/mirror groupsio -email <email> -password-file <path> <group> <destd
 | `-email` | *(required)* | groups.io account email. |
 | `-password-file` | *(required)* | Path to a file holding the account's password, one line. Kept out of the command line and shell history — never pass the password directly as a flag value. |
 
-`<group>` is the group's short name — the `xyz` in `https://groups.io/g/xyz`.
+`<group>` is the group's URL, `https://groups.io/g/xyz` (or the URL of any
+page under it), or just its short name, `xyz`. Given the URL, `mirror`
+picks this method by itself, so `groupsio` can be left out.
 
 For example:
 

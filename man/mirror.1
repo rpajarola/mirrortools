@@ -6,10 +6,10 @@
 .Nd mirror internet accounts and services to local disk
 .Sh SYNOPSIS
 .Nm
-.Ar method
+.Op Ar method
 .Op Ar flags
 .Ar source
-.Ar destdir
+.Op Ar destdir
 .Nm
 .Ar method
 .Fl h
@@ -34,6 +34,51 @@ which come after the method name;
 .Ar method
 .Fl h
 lists them.
+.Pp
+The
+.Ar method
+can be left out when
+.Ar source
+says what it is:
+.Bl -tag -width archiveorg -compact -offset indent
+.It Sx archiveorg
+.Li https://archive.org/details/ Ns ... and
+.Li /download/ Ns ...
+URLs
+.It Sx groupsio
+.Li https://groups.io/g/ Ns ...
+URLs
+.It Sx ftp
+.Li ftp://
+and
+.Li ftps://
+URLs
+.It Sx gopher
+.Li gopher://
+URLs
+.It Sx rsync
+.Li rsync://
+URLs and
+.Sm off
+.Ar host :: Ar module
+.Sm on
+sources
+.It Sx http
+any other
+.Li http://
+or
+.Li https://
+URL
+.El
+The flags then come before
+.Ar source ,
+as they would after the method name.
+.Pp
+The
+.Ar destdir
+can be left out when the configuration file, described in
+.Sx CONFIGURATION ,
+names a default one.
 .Pp
 Running
 .Nm
@@ -161,10 +206,10 @@ On by default.
 .Ss groupsio
 Downloads every file in a groups.io group's Files section.
 .Ar source
-is the group's short name, the
-.Ar name
-in
-.Li https://groups.io/g/ Ns Ar name .
+is the group's URL,
+.Li https://groups.io/g/ Ns Ar name ,
+or the URL of any page under it, or just its short name,
+.Ar name .
 Files land in
 .Ar destdir Ns / Ns Ar name .
 .Bl -tag -width Ds
@@ -289,8 +334,67 @@ copies the directory's contents rather than the directory.
 .It Fl delete
 Delete local files that no longer exist on the remote side.
 .El
+.Sh CONFIGURATION
+The configuration file,
+.Pa ~/.config/mirrortools/config.toml ,
+is in TOML.
+It can set a default
+.Ar destdir ,
+and, in a section per method, default values for that method's flags,
+named without the leading
+.Ql - ,
+and a
+.Ar destdir
+for that method only:
+.Bd -literal -offset indent
+destdir = "~/mirror"
+
+[groupsio]
+email = "me@example.com"
+password-file = "~/.config/mirrortools/groupsio-password"
+
+[http]
+destdir = "~/web"
+wait = "1s"
+.Ed
+.Pp
+Flags given on the command line override the file.
+A leading
+.Ql ~/
+in a value stands for the home directory.
+.Pp
+Most methods mirror each source into a subdirectory of
+.Ar destdir
+of their own, so they can share the default
+.Ar destdir .
+The others are given one when they use it:
+.Sx gphotos
+and
+.Sx icloud
+mirror into
+.Pa gphotos Ns / Ns Ar account
+and
+.Pa icloud Ns / Ns Ar account ,
+.Sx imap
+into
+.Pa imap Ns / Ns Ar host ,
+and
+.Sx rsync
+into
+.Ar host Ns / Ns Ar path ,
+so that the files end up in
+.Ar destdir Ns / Ns Ar host Ns / Ns Ar path
+with or without a trailing slash.
+A method's own
+.Ar destdir ,
+or one given on the command line, is used as it is.
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
+.It Ev MIRROR_CONFIG
+The configuration file to read instead of the default one.
+.It Ev XDG_CONFIG_HOME
+If set, the configuration file is
+.Pa $XDG_CONFIG_HOME/mirrortools/config.toml .
 .It Ev ICLOUD_PASSWORD
 The Apple ID password for
 .Sx icloud ,
@@ -308,6 +412,11 @@ source, instead of
 .Xr ssh 1 .
 .El
 .Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/.config/mirrortools/config.toml
+The configuration file.
+.El
+.Pp
 The state that lets a later run continue is kept in
 .Ar destdir :
 .Bl -tag -width Ds
@@ -330,29 +439,40 @@ has completely downloaded.
 .Sh EXIT STATUS
 .Nm
 exits 0 if everything was mirrored, 1 if anything failed, and 2 for a
-usage error.
+usage error or an error in the configuration file.
 A failed run can be repeated: it continues with what is not done yet.
 .Sh EXAMPLES
 Mirror a directory of a web server:
 .Bd -literal -offset indent
-mirror http https://ftp.gnu.org/gnu/hello/ ~/mirror
+mirror https://ftp.gnu.org/gnu/hello/ ~/mirror
 .Ed
 .Pp
 Mirror an FTP tree, then later pick up new and changed files:
 .Bd -literal -offset indent
-mirror ftp ftp://ftp.example.com/pub/ ~/mirror
-mirror ftp -update ftp://ftp.example.com/pub/ ~/mirror
+mirror ftp://ftp.example.com/pub/ ~/mirror
+mirror -update ftp://ftp.example.com/pub/ ~/mirror
+.Ed
+.Pp
+Mirror an archive.org item into the default
+.Ar destdir
+from the configuration file:
+.Bd -literal -offset indent
+mirror https://archive.org/details/some-item
+.Ed
+.Pp
+Mirror a web page with the
+.Sx http
+method although
+.Sx archiveorg
+would otherwise be picked:
+.Bd -literal -offset indent
+mirror http https://archive.org/about/ ~/mirror
 .Ed
 .Pp
 Mirror a mail account:
 .Bd -literal -offset indent
 mirror imap -user me@example.com -password-file ~/.imap-pw \e
     imap.example.com ~/mail
-.Ed
-.Pp
-Download an Internet Archive item:
-.Bd -literal -offset indent
-mirror archiveorg https://archive.org/details/some-item ~/archive
 .Ed
 .Sh SEE ALSO
 .Xr rsync 1 ,

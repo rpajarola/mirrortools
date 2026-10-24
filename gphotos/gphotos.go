@@ -86,6 +86,8 @@ func init() {
 				return Mirror(ctx, source, destDir, *cookiesPath, effectiveAfter, *before, *companions)
 			}
 		},
+		// The library is laid out by date, so give each account its own.
+		Subdir: func(source string) string { return mirror.SafeName("gphotos", source) },
 	})
 }
 

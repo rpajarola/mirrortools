@@ -76,6 +76,7 @@ func init() {
 				return Mirror(ctx, source, destDir)
 			}
 		},
+		Match: func(source string) bool { return strings.HasPrefix(source, "gopher://") },
 	})
 }
 

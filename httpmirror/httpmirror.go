@@ -61,6 +61,11 @@ func init() {
 				return Mirror(ctx, source, destDir, Options{Update: *update, Wait: *wait})
 			}
 		},
+		// Any web URL that a more specific method doesn't claim.
+		Match: func(source string) bool {
+			return strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://")
+		},
+		Fallback: true,
 	})
 }
 

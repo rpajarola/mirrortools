@@ -109,6 +109,13 @@ func init() {
 				return Mirror(ctx, source, destDir, *user, password, *mailbox)
 			}
 		},
+		Subdir: func(source string) string {
+			host, _, err := net.SplitHostPort(source)
+			if err != nil {
+				host = source
+			}
+			return mirror.SafeName("imap", host)
+		},
 	})
 }
 

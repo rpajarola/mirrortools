@@ -114,6 +114,8 @@ func init() {
 				return Mirror(ctx, source, destDir, pw, dir, *album, *livePhotoVideo, effectiveAfter, *before)
 			}
 		},
+		// The library is laid out by date, so give each account its own.
+		Subdir: func(source string) string { return mirror.SafeName("icloud", source) },
 	})
 }
 

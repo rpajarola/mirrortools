@@ -48,6 +48,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"time"
 
@@ -67,6 +68,16 @@ func init() {
 				return Mirror(ctx, source, destDir, *delete)
 			}
 		},
+		// host:path is left out: it looks like too many other things,
+		// such as an IMAP host:port.
+		Match: func(source string) bool {
+			if strings.HasPrefix(source, "rsync://") {
+				return true
+			}
+			i := strings.Index(source, "::")
+			return i > 0 && !strings.Contains(source[:i], "/")
+		},
+		Subdir: subdir,
 	})
 }
 
@@ -112,6 +123,24 @@ func parseSource(src string) (*rsyncSource, error) {
 		return &rsyncSource{daemon: true, user: user, host: host, port: defaultDaemonPort, path: after}, nil
 	}
 	return &rsyncSource{user: user, host: host, path: rest}, nil
+}
+
+// subdir is <host>/<path> for a source mirrored into the CLI's default
+// directory, where path is the directory the transfer fills: the source
+// path itself with a trailing slash, its parent without one (since then
+// the source's last component is created inside destDir). Either way, the
+// files end up at <default>/<host>/<source path>.
+func subdir(source string) string {
+	src, err := parseSource(source)
+	if err != nil {
+		return ""
+	}
+	p := src.path
+	if !strings.HasSuffix(p, "/") {
+		p = path.Dir(p)
+	}
+	p = strings.TrimLeft(path.Clean("/"+strings.TrimPrefix(p, "~")), "/")
+	return path.Join(src.host, p)
 }
 
 func splitUser(s string) (user, host string) {

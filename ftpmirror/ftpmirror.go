@@ -62,6 +62,9 @@ func init() {
 				return Mirror(ctx, source, destDir, opts)
 			}
 		},
+		Match: func(source string) bool {
+			return strings.HasPrefix(source, "ftp://") || strings.HasPrefix(source, "ftps://")
+		},
 	})
 }
 

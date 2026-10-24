@@ -747,3 +747,22 @@ func (s *fakeServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Write([]byte(entry.body))
 }
+
+func TestParseGroup(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"xyz", "xyz"},
+		{"main+sub", "main+sub"},
+		{"https://groups.io/g/xyz", "xyz"},
+		{"https://groups.io/g/xyz/files/some/dir", "xyz"},
+		{"https://groups.io/g/xyz?foo", "xyz"},
+	} {
+		if got, err := ParseGroup(tc.in); err != nil || got != tc.want {
+			t.Errorf("ParseGroup(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+	for _, in := range []string{"", "https://groups.io/", "https://example.com/g/xyz", "a/b"} {
+		if got, err := ParseGroup(in); err == nil {
+			t.Errorf("ParseGroup(%q) = %q; want an error", in, got)
+		}
+	}
+}
