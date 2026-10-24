@@ -7,6 +7,7 @@
 // Usage:
 //
 //	mirror <method> [method flags] <source> <destdir>
+//	mirror version
 //	mirror gphotos -cookies cookies.txt someone@gmail.com ./photos
 package main
 
@@ -16,6 +17,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rpajarola/mirrortools/internal/version"
 	"github.com/rpajarola/mirrortools/mirror"
 
 	// Blank-import every mirroring backend so its init() registers it.
@@ -40,7 +42,7 @@ func usage() {
 		fmt.Fprintf(os.Stderr, "  %-10s %s\n", m.Name, m.Describe)
 		fmt.Fprintf(os.Stderr, "  %-10s source: %s\n", "", m.Source)
 	}
-	fmt.Fprintf(os.Stderr, "\nrun `%s <method> -h` for method-specific flags\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "\nrun `%s <method> -h` for method-specific flags, `%s version` for the version\n", os.Args[0], os.Args[0])
 }
 
 func main() {
@@ -53,6 +55,10 @@ func main() {
 	name := os.Args[1]
 	if name == "-h" || name == "-help" || name == "--help" {
 		usage()
+		return
+	}
+	if name == "version" || name == "-version" || name == "--version" {
+		fmt.Printf("mirror %s\n", version.String())
 		return
 	}
 

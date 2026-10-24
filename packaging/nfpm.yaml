@@ -1,0 +1,42 @@
+name: mirrortools
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "Rico Pajarola <rp@servium.ch>"
+homepage: "https://github.com/rpajarola/mirrortools"
+license: GPL-3.0-only
+description: |
+  Mirror internet accounts and services to local disk.
+  The mirror command copies HTTP(S) and FTP trees, Internet Archive items,
+  Gopher menus, rsync modules, IMAP mailboxes, Google Photos, iCloud
+  Photos and groups.io files into a local directory. Re-running it picks
+  up where the previous run left off.
+
+contents:
+  # nfpm's ${VAR} expansion doesn't reach contents[].src, so build-deb.sh
+  # builds into this fixed path.
+  - src: dist/bin/mirror
+    dst: /usr/bin/mirror
+    file_info:
+      mode: 0755
+
+  - src: README.md
+    dst: /usr/share/doc/mirrortools/README.md
+  - src: archiveorg/README.md
+    dst: /usr/share/doc/mirrortools/archiveorg.md
+  - src: ftpmirror/README.md
+    dst: /usr/share/doc/mirrortools/ftp.md
+  - src: gopher/README.md
+    dst: /usr/share/doc/mirrortools/gopher.md
+  - src: gphotos/README.md
+    dst: /usr/share/doc/mirrortools/gphotos.md
+  - src: groupsio/README.md
+    dst: /usr/share/doc/mirrortools/groupsio.md
+  - src: httpmirror/README.md
+    dst: /usr/share/doc/mirrortools/http.md
+  - src: icloud/README.md
+    dst: /usr/share/doc/mirrortools/icloud.md
+  - src: LICENSE
+    dst: /usr/share/doc/mirrortools/copyright

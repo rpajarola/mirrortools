@@ -1,11 +1,29 @@
 # mirrortools
 Tools for mirroring internet accounts/services to local disk.
 
+## Install
+
+Packages are attached to each [release](https://github.com/rpajarola/mirrortools/releases),
+and available from:
+
+- **Debian and Ubuntu** (amd64, arm64): the [apt repository](https://rpajarola.github.io/apt/),
+  then `sudo apt install mirrortools`
+- **macOS**: the [Homebrew tap](https://github.com/rpajarola/homebrew-tap),
+  `brew install rpajarola/tap/mirrortools`, or the installer package from a
+  release, which needs no Homebrew
+
+All of them install the `mirror` command. [packaging](packaging/README.md)
+describes what is installed and how the packages are built.
+
+Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@latest`
+
 ## Layout
 
 - `mirror/` — the top-level library: the `Method`/`Func` interface every
   backend implements, and the registry the CLI uses to find them.
 - `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry.
+- `packaging/` — `.deb`, macOS `.pkg` and Homebrew packaging, built by
+  the release workflow. See [`packaging/README.md`](packaging/README.md).
 - `gphotos/` — the Google Photos backend (registers itself as `gphotos`).
   See [`gphotos/README.md`](gphotos/README.md) for how to get cookies for
   it, including the Chrome DBSC quirk that can make them stop working
