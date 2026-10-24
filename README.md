@@ -12,7 +12,8 @@ and available from:
   `brew install rpajarola/tap/mirrortools`, or the installer package from a
   release, which needs no Homebrew
 
-All of them install the `mirror` command. [packaging](packaging/README.md)
+All of them install the `mirror` command and its manual page,
+[mirror(1)](https://rpajarola.github.io/apt/mirrortools/mirror.1.html). [packaging](packaging/README.md)
 describes what is installed and how the packages are built.
 
 Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@latest`
@@ -22,6 +23,7 @@ Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@lat
 - `mirror/` — the top-level library: the `Method`/`Func` interface every
   backend implements, and the registry the CLI uses to find them.
 - `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry.
+- `man/` — the `mirror(1)` manual page.
 - `packaging/` — `.deb`, macOS `.pkg` and Homebrew packaging, built by
   the release workflow. See [`packaging/README.md`](packaging/README.md).
 - `gphotos/` — the Google Photos backend (registers itself as `gphotos`).

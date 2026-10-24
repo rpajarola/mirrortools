@@ -22,6 +22,9 @@ contents:
     file_info:
       mode: 0755
 
+  - src: man/mirror.1
+    dst: /usr/share/man/man1/mirror.1
+
   - src: README.md
     dst: /usr/share/doc/mirrortools/README.md
   - src: archiveorg/README.md

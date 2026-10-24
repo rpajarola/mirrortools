@@ -38,6 +38,7 @@ Debian and Ubuntu:
 
 ```
 /usr/bin/mirror
+/usr/share/man/man1/mirror.1
 /usr/share/doc/mirrortools/                # README.md, and <method>.md for each method
 ```
 
@@ -45,6 +46,7 @@ macOS (`.pkg`):
 
 ```
 /usr/local/bin/mirror
+/usr/local/share/man/man1/mirror.1
 /usr/local/share/mirrortools/              # README.md, <method>.md, uninstall.sh
 ```
 

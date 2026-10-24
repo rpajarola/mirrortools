@@ -15,7 +15,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 root="$work/root"
 share="$root/usr/local/share/mirrortools"
-mkdir -p "$root/usr/local/bin" "$share"
+mkdir -p "$root/usr/local/bin" "$share" "$root/usr/local/share/man/man1"
 
 for arch in arm64 amd64; do
   CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
@@ -32,6 +32,7 @@ for f in */README.md; do
   esac
   cp "$f" "$share/$name.md"
 done
+install -m 0644 man/mirror.1 "$root/usr/local/share/man/man1/"
 install -m 0755 packaging/macos/uninstall.sh "$share/uninstall.sh"
 
 pkgbuild --root "$root" \

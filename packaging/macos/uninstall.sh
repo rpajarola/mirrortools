@@ -7,7 +7,7 @@ if [ "$(id -u)" != 0 ]; then
   echo "run with sudo" >&2
   exit 1
 fi
-rm -f /usr/local/bin/mirror
+rm -f /usr/local/bin/mirror /usr/local/share/man/man1/mirror.1
 rm -rf /usr/local/share/mirrortools
 pkgutil --forget io.github.rpajarola.mirrortools >/dev/null 2>&1 || true
 echo "mirrortools removed"
