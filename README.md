@@ -14,6 +14,8 @@ Tools for mirroring internet accounts/services to local disk.
   `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
 - `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
   See [`gopher/README.md`](gopher/README.md).
+- `httpmirror/` — the generic HTTP(S) backend (registers itself as `http`).
+  See [`httpmirror/README.md`](httpmirror/README.md).
 - `groupsio/` — the groups.io backend (registers itself as `groupsio`). See
   [`groupsio/README.md`](groupsio/README.md).
 - `icloud/` — the iCloud Photos backend (registers itself as `icloud`).
@@ -52,6 +54,12 @@ Or to mirror a Gopher menu tree:
 
 ```
 go run ./cmd/mirror gopher gopher://gopher.floodgap.com/1/gopher/toybox ./mirror
+```
+
+Or to mirror everything under a path of a web server:
+
+```
+go run ./cmd/mirror http https://ftp.gnu.org/gnu/hello/ ./mirror
 ```
 
 Or to mirror a groups.io group's Files section:
