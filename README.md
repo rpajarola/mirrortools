@@ -12,6 +12,8 @@ Tools for mirroring internet accounts/services to local disk.
   within minutes.
 - `archiveorg/` — the Internet Archive backend (registers itself as
   `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
+- `ftpmirror/` — the FTP backend (registers itself as `ftp`). See
+  [`ftpmirror/README.md`](ftpmirror/README.md).
 - `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
   See [`gopher/README.md`](gopher/README.md).
 - `httpmirror/` — the generic HTTP(S) backend (registers itself as `http`).
@@ -60,6 +62,12 @@ Or to mirror everything under a path of a web server:
 
 ```
 go run ./cmd/mirror http https://ftp.gnu.org/gnu/hello/ ./mirror
+```
+
+Or to mirror a directory tree of an FTP server:
+
+```
+go run ./cmd/mirror ftp ftp://ftp.gnu.org/gnu/hello/ ./mirror
 ```
 
 Or to mirror a groups.io group's Files section:

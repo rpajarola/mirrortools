@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/gokrazy/rsync v0.3.7
+	github.com/jlaffaye/ftp v0.2.4
 	golang.org/x/net v0.61.0
 	modernc.org/sqlite v1.61.0
 )
