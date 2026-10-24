@@ -18,6 +18,8 @@ import (
 
 // ---- parseSource ----
 
+func init() { restrictFS = false }
+
 func TestParseSource(t *testing.T) {
 	cases := []struct {
 		name    string

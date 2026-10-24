@@ -128,6 +128,13 @@ func splitHostPort(s string) (host, port string) {
 	return s, ""
 }
 
+// restrictFS lets the rsync client confine the process's file system access
+// to destDir (Landlock, on Linux) for the rest of its lifetime — a defense
+// against a malicious server, and harmless for the mirror CLI, which exits
+// after one Mirror call. Tests turn it off: in a test binary, it would lock
+// every later test out of its own temp directories.
+var restrictFS = true
+
 // Mirror downloads every file of an rsync source into destDir (which the
 // caller guarantees exists) in archive mode, optionally deleting local
 // files absent from the remote side. See the package doc comment for the
@@ -143,7 +150,11 @@ func Mirror(ctx context.Context, source, destDir string, delete bool) error {
 	if delete {
 		args = append(args, "--delete")
 	}
-	client, err := rsyncclient.New(args)
+	var opts []rsyncclient.Option
+	if !restrictFS {
+		opts = append(opts, rsyncclient.DontRestrict())
+	}
+	client, err := rsyncclient.New(args, opts...)
 	if err != nil {
 		return fmt.Errorf("rsync: %w", err)
 	}
