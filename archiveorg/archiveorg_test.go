@@ -274,7 +274,7 @@ func TestMirrorEndToEnd(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), "test-item", destDir, false); err != nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -298,7 +298,7 @@ func TestMirrorEndToEnd(t *testing.T) {
 	// A second run must skip outright (the .done marker), never even
 	// fetching metadata again.
 	before := fs.requestCount("/metadata/test-item")
-	if err := Mirror(context.Background(), "test-item", destDir, false); err != nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if after := fs.requestCount("/metadata/test-item"); after != before {
@@ -306,7 +306,7 @@ func TestMirrorEndToEnd(t *testing.T) {
 	}
 
 	// -f (force) must re-check even with .done present.
-	if err := Mirror(context.Background(), "test-item", destDir, true); err != nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if after := fs.requestCount("/metadata/test-item"); after == before {
@@ -336,7 +336,7 @@ func TestMirrorSkipsFileAlreadyOnDiskAtExpectedSize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Mirror(context.Background(), "test-item", destDir, false); err != nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if n := fs.requestCount("/download/test-item/a.txt"); n != 0 {
@@ -357,7 +357,7 @@ func TestMirrorDarkItemReturnsErrorWithoutDoneMarker(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), "test-item", destDir, false); err == nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err == nil {
 		t.Fatal("expected an error for a dark item")
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "test-item", doneFileName)); !os.IsNotExist(err) {
@@ -374,7 +374,7 @@ func TestMirrorNoFilesReturnsError(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), "test-item", destDir, false); err == nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err == nil {
 		t.Fatal("expected an error for an item with no files listed")
 	}
 }
@@ -389,7 +389,7 @@ func TestMirrorRejectsPathTraversalFileName(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), "test-item", destDir, false); err == nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err == nil {
 		t.Fatal("expected an error for a file name that escapes the item directory")
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "evil.txt")); !os.IsNotExist(err) {
@@ -411,7 +411,7 @@ func TestMirrorSkipsChecksumForItemsFilesXML(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), identifier, destDir, false); err != nil {
+	if err := Mirror(context.Background(), identifier, destDir, Options{}); err != nil {
 		t.Fatalf("a wrong md5 on the item's own _files.xml must not fail the mirror: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(destDir, identifier, identifier+"_files.xml"))
@@ -430,7 +430,7 @@ func TestMirrorFailedDownloadReturnsErrorWithoutDoneMarker(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), "test-item", destDir, false); err == nil {
+	if err := Mirror(context.Background(), "test-item", destDir, Options{}); err == nil {
 		t.Fatal("expected an error when a listed file can't be downloaded")
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "test-item", doneFileName)); !os.IsNotExist(err) {
@@ -519,7 +519,7 @@ func TestMirrorSetsMTimesFromFilesXML(t *testing.T) {
 	useTestServerAsDefaultTransport(t, srv)
 
 	destDir := t.TempDir()
-	if err := Mirror(context.Background(), identifier, destDir, false); err != nil {
+	if err := Mirror(context.Background(), identifier, destDir, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(destDir, identifier, "a.txt"))
@@ -576,10 +576,16 @@ type fakeServer struct {
 	requests []string
 	md       metadata
 	files    map[string]string // file name -> body
+	// fail holds, per request path, statuses to answer with before
+	// serving it normally, each sent with the Retry-After header in
+	// retryAfter (if any).
+	fail       map[string][]int
+	retryAfter string
+	userAgents []string
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{files: map[string]string{}}
+	return &fakeServer{files: map[string]string{}, fail: map[string][]int{}}
 }
 
 func (s *fakeServer) setFile(name, body string) {
@@ -603,6 +609,16 @@ func (s *fakeServer) requestCount(path string) int {
 func (s *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.requests = append(s.requests, r.URL.Path)
+	s.userAgents = append(s.userAgents, r.UserAgent())
+	if f := s.fail[r.URL.Path]; len(f) > 0 {
+		s.fail[r.URL.Path] = f[1:]
+		if s.retryAfter != "" {
+			w.Header().Set("Retry-After", s.retryAfter)
+		}
+		s.mu.Unlock()
+		w.WriteHeader(f[0])
+		return
+	}
 	s.mu.Unlock()
 
 	switch {
@@ -631,5 +647,163 @@ func (s *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(body))
 	default:
 		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// ---- retries and pacing ----
+
+// fastRetries shrinks the retry delays for the length of a test.
+func fastRetries(t *testing.T) {
+	t.Helper()
+	base, maxDelay := retryBase, maxRetryDelay
+	retryBase, maxRetryDelay = time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { retryBase, maxRetryDelay = base, maxDelay })
+}
+
+func TestMirrorRetriesTransientFailures(t *testing.T) {
+	fastRetries(t)
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "a.txt", Size: "5"}}}
+	fs.setFile("a.txt", "hello")
+	fs.fail["/metadata/test-item"] = []int{http.StatusServiceUnavailable}
+	fs.fail["/download/test-item/a.txt"] = []int{http.StatusTooManyRequests, http.StatusBadGateway}
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), "test-item", destDir, Options{Retries: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if n := fs.requestCount("/metadata/test-item"); n != 2 {
+		t.Errorf("metadata: %d requests, want 2", n)
+	}
+	if n := fs.requestCount("/download/test-item/a.txt"); n != 3 {
+		t.Errorf("a.txt: %d requests, want 3", n)
+	}
+	if got, err := os.ReadFile(filepath.Join(destDir, "test-item", "a.txt")); err != nil || string(got) != "hello" {
+		t.Errorf("a.txt: got %q, %v", got, err)
+	}
+}
+
+func TestMirrorGivesUpAfterRetries(t *testing.T) {
+	fastRetries(t)
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "a.txt", Size: "5"}}}
+	fs.setFile("a.txt", "hello")
+	fs.fail["/download/test-item/a.txt"] = []int{503, 503, 503, 503}
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), "test-item", destDir, Options{Retries: 2}); err == nil {
+		t.Fatal("expected an error once the retries are used up")
+	}
+	if n := fs.requestCount("/download/test-item/a.txt"); n != 3 {
+		t.Errorf("a.txt: %d requests, want 3 (1 + 2 retries)", n)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "test-item", doneFileName)); !os.IsNotExist(err) {
+		t.Errorf("a failed item must not be marked done, stat err = %v", err)
+	}
+}
+
+func TestMirrorDoesNotRetryNotFound(t *testing.T) {
+	fastRetries(t)
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "missing.txt", Size: "5"}}}
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	if err := Mirror(context.Background(), "test-item", t.TempDir(), Options{Retries: 5}); err == nil {
+		t.Fatal("expected an error for a missing file")
+	}
+	if n := fs.requestCount("/download/test-item/missing.txt"); n != 1 {
+		t.Errorf("a 404 was requested %d times, want 1", n)
+	}
+}
+
+func TestMirrorHonorsRetryAfter(t *testing.T) {
+	fastRetries(t)
+	maxRetryDelay = time.Minute // so the 1s Retry-After isn't capped
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "a.txt", Size: "5"}}}
+	fs.setFile("a.txt", "hello")
+	fs.fail["/download/test-item/a.txt"] = []int{http.StatusTooManyRequests}
+	fs.retryAfter = "1"
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	start := time.Now()
+	if err := Mirror(context.Background(), "test-item", t.TempDir(), Options{Retries: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < time.Second {
+		t.Errorf("finished after %v, want at least the 1s Retry-After", d)
+	}
+}
+
+func TestMirrorWaitsBetweenRequests(t *testing.T) {
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "a.txt", Size: "1"}, {Name: "b.txt", Size: "1"}}}
+	fs.setFile("a.txt", "a")
+	fs.setFile("b.txt", "b")
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	const wait = 100 * time.Millisecond
+	start := time.Now()
+	if err := Mirror(context.Background(), "test-item", t.TempDir(), Options{Wait: wait}); err != nil {
+		t.Fatal(err)
+	}
+	// Three requests (metadata, a.txt, b.txt), so two waits.
+	if d := time.Since(start); d < 2*wait {
+		t.Errorf("finished after %v, want at least %v", d, 2*wait)
+	}
+}
+
+func TestMirrorSendsUserAgent(t *testing.T) {
+	fs := newFakeServer()
+	fs.md = metadata{Files: []metaFile{{Name: "a.txt", Size: "1"}}}
+	fs.setFile("a.txt", "a")
+
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	useTestServerAsDefaultTransport(t, srv)
+
+	if err := Mirror(context.Background(), "test-item", t.TempDir(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, ua := range fs.userAgents {
+		if !strings.HasPrefix(ua, "mirrortools/") {
+			t.Errorf("User-Agent %q, want mirrortools/<version>", ua)
+		}
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		h    string
+		want time.Duration
+	}{
+		{"", 0},
+		{"120", 2 * time.Minute},
+		{"-5", 0},
+		{"soon", 0},
+		{now.Add(90 * time.Second).Format(http.TimeFormat), 90 * time.Second},
+		{now.Add(-time.Hour).Format(http.TimeFormat), 0},
+	} {
+		if got := retryAfter(tc.h, now); got != tc.want {
+			t.Errorf("retryAfter(%q) = %v, want %v", tc.h, got, tc.want)
+		}
 	}
 }

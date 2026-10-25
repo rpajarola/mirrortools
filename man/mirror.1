@@ -118,6 +118,20 @@ item.
 .Bl -tag -width Ds
 .It Fl f
 Check the item again even if it is marked done.
+.It Fl wait Ar duration
+Wait
+.Ar duration ,
+such as 1s or 500ms, between requests.
+The default is not to wait.
+.It Fl retries Ar n
+Try a request again up to
+.Ar n
+times, 5 by default, when it fails with status 429 or 5xx, a network
+error or a bad checksum.
+The wait before each retry doubles from 2 seconds up to 10 minutes,
+unless the server's
+.Ql Retry-After
+header asks for a different one.
 .El
 .Ss ftp
 Recursively mirrors a directory, or a single file, of an FTP server.

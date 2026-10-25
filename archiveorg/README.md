@@ -13,7 +13,7 @@ archive.org's public `metadata` and `download` endpoints directly instead.
 ## Usage
 
 ```
-go run ./cmd/mirror archiveorg [-f] <archive.org item> <destdir>
+mirror archiveorg [-f] [-wait <duration>] [-retries <n>] <archive.org item> <destdir>
 ```
 
 `<archive.org item>` can be a full URL — `https://archive.org/details/<id>`
@@ -22,6 +22,8 @@ or `https://archive.org/download/<id>` — or a bare identifier.
 | Flag | Default | Meaning |
 |---|---|---|
 | `-f` | `false` | Re-download even if a previous run's `.done` marker is present in `<destdir>/<id>`. |
+| `-wait` | `0` | Delay between requests, e.g. `1s` or `500ms`. |
+| `-retries` | `5` | How many times to retry a request that failed with 429 Too Many Requests, a 5xx status, a network error or a bad checksum. |
 
 Each item is mirrored into its own `<destdir>/<id>` subdirectory (created if
 needed), so one `<destdir>` can hold several mirrored items side by side.
@@ -51,3 +53,20 @@ entry, whose md5 was necessarily computed before that self-referential entry
 existed — so it can never truthfully match its own declared checksum. This
 is an archive.org quirk confirmed against multiple real items' metadata, not
 a sign of a bad download.
+
+## Rate limiting
+
+Files are downloaded one at a time. A request that archive.org answers with
+429 or a 5xx status, or that fails on the network, is tried again after
+2s, 4s, 8s, ... (at most 10 minutes), or after as long as the response's
+`Retry-After` header says. Other errors, such as 404, fail the run straight
+away. `-wait` adds a fixed pause between all requests, for long runs that
+should go easy on archive.org; it can be set once in the config file:
+
+```toml
+[archiveorg]
+wait = "1s"
+```
+
+Requests carry a `mirrortools/<version>` User-Agent, so archive.org can
+tell who is making them.

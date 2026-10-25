@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rpajarola/mirrortools/internal/version"
 	"github.com/rpajarola/mirrortools/mirror"
 )
 
@@ -41,8 +43,10 @@ func init() {
 		Describe: "download every file of an Internet Archive item over plain HTTPS",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			force := fs.Bool("f", false, "re-download even if a previous run's .done marker is present")
+			wait := fs.Duration("wait", 0, "delay between requests")
+			retries := fs.Int("retries", 5, "times to retry a request that failed with 429, a 5xx status or a network error")
 			return func(ctx context.Context, source, destDir string) error {
-				return Mirror(ctx, source, destDir, *force)
+				return Mirror(ctx, source, destDir, Options{Force: *force, Wait: *wait, Retries: *retries})
 			}
 		},
 		Match: func(source string) bool { return itemURLRe.MatchString(source) },
@@ -96,22 +100,46 @@ type metaFile struct {
 	MD5  string `json:"md5"`
 }
 
-func fetchMetadata(ctx context.Context, c *http.Client, identifier string) (*metadata, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://archive.org/metadata/"+url.PathEscape(identifier), nil)
+// userAgent identifies this tool to archive.org, which asks API clients
+// to say who they are.
+var userAgent = "mirrortools/" + version.String() + " (+https://github.com/rpajarola/mirrortools)"
+
+// get sends a GET request for u. Failures that are worth trying again —
+// the request not getting through, 429 Too Many Requests, or a 5xx status
+// — come back as a *retryableError.
+func get(ctx context.Context, c *http.Client, u string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := c.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &retryableError{err: err}
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	resp.Body.Close()
+	err = fmt.Errorf("http %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, &retryableError{err: err, after: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+	}
+	return nil, err
+}
+
+func fetchMetadata(ctx context.Context, c *http.Client, identifier string) (*metadata, error) {
+	resp, err := get(ctx, c, "https://archive.org/metadata/"+url.PathEscape(identifier))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d", resp.StatusCode)
-	}
 	var md metadata
 	if err := json.NewDecoder(resp.Body).Decode(&md); err != nil {
-		return nil, fmt.Errorf("decoding metadata: %w", err)
+		return nil, &retryableError{err: fmt.Errorf("decoding metadata: %w", err)}
 	}
 	return &md, nil
 }
@@ -171,18 +199,11 @@ func downloadFile(ctx context.Context, c *http.Client, srcURL, finalPath, wantMD
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srcURL, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.Do(req)
+	resp, err := get(ctx, c, srcURL)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %d", resp.StatusCode)
-	}
 
 	tmpPath := finalPath + tmpSuffix
 	out, err := os.Create(tmpPath)
@@ -194,7 +215,10 @@ func downloadFile(ctx context.Context, c *http.Client, srcURL, finalPath, wantMD
 	closeErr := out.Close()
 	if copyErr != nil {
 		os.Remove(tmpPath)
-		return copyErr
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &retryableError{err: copyErr}
 	}
 	if closeErr != nil {
 		os.Remove(tmpPath)
@@ -203,10 +227,92 @@ func downloadFile(ctx context.Context, c *http.Client, srcURL, finalPath, wantMD
 	if wantMD5 != "" {
 		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, wantMD5) {
 			os.Remove(tmpPath)
-			return fmt.Errorf("md5 mismatch: got %s, want %s", got, wantMD5)
+			// Most likely corrupted in transit, so worth another try.
+			return &retryableError{err: fmt.Errorf("md5 mismatch: got %s, want %s", got, wantMD5)}
 		}
 	}
 	return os.Rename(tmpPath, finalPath)
+}
+
+// retryableError is a failure that may go away if the request is made
+// again later: after the server's Retry-After, if it sent one.
+type retryableError struct {
+	err   error
+	after time.Duration
+}
+
+func (e *retryableError) Error() string { return e.err.Error() }
+func (e *retryableError) Unwrap() error { return e.err }
+
+// retryAfter parses a Retry-After header, either seconds or an HTTP date,
+// into how long to wait from now. It returns 0 if there is none.
+func retryAfter(h string, now time.Time) time.Duration {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(h); err == nil {
+		return max(time.Duration(secs)*time.Second, 0)
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		return max(t.Sub(now), 0)
+	}
+	return 0
+}
+
+// The delays between retries: retryBase doubled with every attempt, and a
+// cap on that and on a server's Retry-After. Vars so tests can shrink them.
+var (
+	retryBase     = 2 * time.Second
+	maxRetryDelay = 10 * time.Minute
+)
+
+// pacer runs requests one after the other, at least wait apart, retrying
+// those that fail with a *retryableError.
+type pacer struct {
+	wait    time.Duration
+	retries int
+	last    time.Time // when the previous request finished
+}
+
+// do runs fn, a single request described by what, until it succeeds, fails
+// for good, or has been retried p.retries times.
+func (p *pacer) do(ctx context.Context, what string, fn func() error) error {
+	for attempt := 0; ; attempt++ {
+		if !p.last.IsZero() {
+			if err := sleep(ctx, time.Until(p.last.Add(p.wait))); err != nil {
+				return err
+			}
+		}
+		err := fn()
+		p.last = time.Now()
+		var re *retryableError
+		if err == nil || !errors.As(err, &re) || attempt >= p.retries {
+			return err
+		}
+		delay := min(retryBase<<attempt, maxRetryDelay)
+		if re.after > 0 {
+			delay = min(re.after, maxRetryDelay)
+		}
+		log.Printf("archiveorg: %s: %v; retrying in %v", what, err, delay)
+		if err := sleep(ctx, delay); err != nil {
+			return err
+		}
+	}
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // filesXML is the subset of an item's <id>_files.xml this cares about.
@@ -255,6 +361,18 @@ func applyMTimes(itemDir, filesXMLPath string) error {
 	return nil
 }
 
+// Options control a Mirror run.
+type Options struct {
+	// Force checks the item again even if it is marked done.
+	Force bool
+	// Wait is the delay between requests.
+	Wait time.Duration
+	// Retries is how many times a request is tried again after a 429, a
+	// 5xx status or a network error, waiting longer each time, or as long
+	// as the server's Retry-After says.
+	Retries int
+}
+
 // Mirror downloads every file listed in the archive.org item identified by
 // source (a details/download URL, or a bare identifier) into destDir, which
 // the caller guarantees exists.
@@ -268,7 +386,7 @@ func applyMTimes(itemDir, filesXMLPath string) error {
 // were already on disk from an earlier run.
 //
 // A <destDir>/<identifier>/.done marker from a prior fully-successful run
-// causes an immediate, silent skip unless force is set. Mirror only ever
+// causes an immediate, silent skip unless opts.Force is set. Mirror only ever
 // writes that marker after every file in the item's metadata listing has
 // been fetched (or already matched what's on disk) and, wherever the
 // metadata supplied a checksum, verified — so unlike the Python
@@ -276,7 +394,7 @@ func applyMTimes(itemDir, filesXMLPath string) error {
 // for a partial download: any failure partway through returns an error
 // instead, leaving no marker behind, so a subsequent run resumes rather
 // than silently reporting success.
-func Mirror(ctx context.Context, source, destDir string, force bool) error {
+func Mirror(ctx context.Context, source, destDir string, opts Options) error {
 	identifier, err := ParseIdentifier(source)
 	if err != nil {
 		return err
@@ -284,7 +402,7 @@ func Mirror(ctx context.Context, source, destDir string, force bool) error {
 	itemDir := filepath.Join(destDir, identifier)
 
 	donePath := filepath.Join(itemDir, doneFileName)
-	if !force {
+	if !opts.Force {
 		if _, err := os.Stat(donePath); err == nil {
 			log.Printf("archiveorg: %s already mirrored (%s present), skipping", identifier, doneFileName)
 			return nil
@@ -310,9 +428,14 @@ func Mirror(ctx context.Context, source, destDir string, force bool) error {
 		transport = t
 	}
 	client := &http.Client{Transport: transport}
+	p := &pacer{wait: opts.Wait, retries: opts.Retries}
 
 	log.Printf("archiveorg: fetching metadata for %s", identifier)
-	md, err := fetchMetadata(ctx, client, identifier)
+	var md *metadata
+	err = p.do(ctx, "metadata", func() (err error) {
+		md, err = fetchMetadata(ctx, client, identifier)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("fetching metadata for %s: %w", identifier, err)
 	}
@@ -355,7 +478,10 @@ func Mirror(ctx context.Context, source, destDir string, force bool) error {
 		}
 
 		log.Printf("archiveorg: downloading %s (%d bytes)", f.Name, size)
-		if err := downloadFile(ctx, client, downloadURL(identifier, f.Name), finalPath, wantMD5); err != nil {
+		err = p.do(ctx, f.Name, func() error {
+			return downloadFile(ctx, client, downloadURL(identifier, f.Name), finalPath, wantMD5)
+		})
+		if err != nil {
 			return fmt.Errorf("downloading %s: %w", f.Name, err)
 		}
 		downloaded++
