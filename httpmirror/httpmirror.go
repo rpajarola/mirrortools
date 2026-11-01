@@ -46,6 +46,7 @@ import (
 	"golang.org/x/net/html"
 	_ "modernc.org/sqlite"
 
+	"github.com/rpajarola/mirrortools/git"
 	"github.com/rpajarola/mirrortools/mirror"
 )
 
@@ -171,9 +172,17 @@ func Mirror(ctx context.Context, source, destDir string, opts Options) error {
 	if start.Host == "" {
 		return fmt.Errorf("no host in %q", source)
 	}
+	if git.Match(source) {
+		return git.Mirror(ctx, source, destDir)
+	}
 	normalize(start)
 
-	db, err := openDB(filepath.Join(destDir, dbFileName))
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) && git.ProbeHTTP(ctx, source) {
+		return git.Mirror(ctx, source, destDir)
+	}
+
+	db, err := openDB(dbPath)
 	if err != nil {
 		return err
 	}
@@ -201,9 +210,13 @@ func Mirror(ctx context.Context, source, destDir string, opts Options) error {
 		opts:    opts,
 	}
 
-	root, err := c.resolveStart(ctx, start)
+	root, isGit, err := c.resolveStart(ctx, start)
 	if err != nil {
 		return err
+	}
+	if isGit {
+		db.Close()
+		return git.Mirror(ctx, root.String(), destDir)
 	}
 	c.scope = &url.URL{Scheme: root.Scheme, Host: root.Host, Path: dirOf(root.Path)}
 	log.Printf("http: mirroring %s into %s", c.scope, destDir)
@@ -250,26 +263,28 @@ func openDB(dbPath string) (*sql.DB, error) {
 // resolveStart follows source's redirects to find the URL the crawl
 // actually starts from (and whose directory is the scope). The result is
 // remembered in the database, so a re-run doesn't have to ask the server
-// again.
-func (c *crawler) resolveStart(ctx context.Context, start *url.URL) (*url.URL, error) {
+// again. If the resolved URL turns out to be a Git repository, isGit is
+// true and nothing is recorded in meta.
+func (c *crawler) resolveStart(ctx context.Context, start *url.URL) (u *url.URL, isGit bool, err error) {
 	key := "start:" + start.String()
 	var s string
 	if err := c.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&s); err == nil {
-		return url.Parse(s)
+		u, err := url.Parse(s)
+		return u, false, err
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
+		return nil, false, err
 	}
 
-	u := start
+	u = start
 	for range 10 {
 		req, err := c.newRequest(ctx, u)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		resp, err := c.client.Do(req)
 		c.requests++
 		if err != nil {
-			return nil, fmt.Errorf("fetching %s: %w", u, err)
+			return nil, false, fmt.Errorf("fetching %s: %w", u, err)
 		}
 		resp.Body.Close()
 		loc, err := resp.Location()
@@ -279,10 +294,13 @@ func (c *crawler) resolveStart(ctx context.Context, start *url.URL) (*url.URL, e
 		normalize(loc)
 		u = loc
 	}
-	if _, err := c.db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, key, u.String()); err != nil {
-		return nil, err
+	if git.Match(u.String()) || git.ProbeHTTP(ctx, u.String()) {
+		return u, true, nil
 	}
-	return u, nil
+	if _, err := c.db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, key, u.String()); err != nil {
+		return nil, false, err
+	}
+	return u, false, nil
 }
 
 // run works through pending URLs in the order they were discovered until

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -424,5 +426,53 @@ func TestMirrorResumesAfterTransientError(t *testing.T) {
 func TestMirrorRejectsNonHTTP(t *testing.T) {
 	if err := Mirror(context.Background(), "ftp://example.com/", t.TempDir(), Options{}); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestMirrorDelegatesGitRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	out, err := exec.Command("git", "--exec-path").Output()
+	if err != nil {
+		t.Skip(err)
+	}
+	backend := filepath.Join(strings.TrimSpace(string(out)), "git-http-backend")
+	if _, err := os.Stat(backend); err != nil {
+		t.Skipf("git-http-backend not found: %v", err)
+	}
+
+	root := t.TempDir()
+	bareDir := filepath.Join(root, "sub", "repo.git")
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "--bare", "-q", "-b", "main", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.Symlink("repo.git", filepath.Join(root, "sub", "repo")); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(&cgi.Handler{
+		Path: backend,
+		Env: []string{
+			"GIT_PROJECT_ROOT=" + root,
+			"GIT_HTTP_EXPORT_ALL=1",
+		},
+	})
+	defer srv.Close()
+
+	// Without .git suffix: detected via ProbeHTTP and mirrored via git.
+	destDir := t.TempDir()
+	if err := Mirror(context.Background(), srv.URL+"/sub/repo", destDir, Options{}); err != nil {
+		t.Fatalf("Mirror(git URL without .git): %v", err)
+	}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if _, err := os.Stat(filepath.Join(destDir, host, "sub", "repo", "HEAD")); err != nil {
+		t.Errorf("expected bare git mirror at %s/sub/repo: %v", host, err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, dbFileName)); !os.IsNotExist(err) {
+		t.Errorf("should not leave %s behind when delegating to git", dbFileName)
 	}
 }

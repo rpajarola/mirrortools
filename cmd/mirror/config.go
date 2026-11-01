@@ -23,6 +23,9 @@ import (
 //	email = "me@example.com"
 //	password-file = "~/.config/mirrortools/groupsio-password"
 //
+//	[git]
+//	destdir = "~/git"
+//
 //	[http]
 //	destdir = "~/web"
 //	wait = "1s"

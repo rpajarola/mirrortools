@@ -34,6 +34,8 @@ Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@lat
   `archiveorg`). See [`archiveorg/README.md`](archiveorg/README.md).
 - `ftpmirror/` — the FTP backend (registers itself as `ftp`). See
   [`ftpmirror/README.md`](ftpmirror/README.md).
+- `git/` — the Git repository backend (registers itself as `git`). See
+  [`git/README.md`](git/README.md).
 - `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
   See [`gopher/README.md`](gopher/README.md).
 - `httpmirror/` — the generic HTTP(S) backend (registers itself as `http`).
@@ -63,9 +65,11 @@ mirror [<method>] [flags] <source> [<destdir>]
 The method can be left out when the source says what it is:
 `https://archive.org/details/...` goes to `archiveorg`,
 `https://groups.io/g/...` to `groupsio`, `ftp://` and `ftps://` to `ftp`,
-`gopher://` to `gopher`, `rsync://` and `host::module` to `rsync`, and any
-other `http://` or `https://` URL to `http`. The destination can be left
-out when the config file names a default one.
+`gopher://` to `gopher`, `rsync://` and `host::module` to `rsync`, Git
+repository URLs (`git://`, `ssh://`, `git@host:path`, `*.git`, and
+repositories served over `http://` or `https://`) to `git`, and any other
+`http://` or `https://` URL to `http`. The destination can be left out when
+the config file names a default one.
 
 For example, to mirror a Google Photos account:
 
@@ -123,6 +127,9 @@ destdir = "~/mirror"
 [groupsio]
 email = "you@example.com"
 password-file = "~/.config/mirrortools/groupsio-password"
+
+[git]
+destdir = "~/git"
 
 [http]
 wait = "1s"

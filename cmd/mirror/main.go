@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rpajarola/mirrortools/git"
 	"github.com/rpajarola/mirrortools/internal/version"
 	"github.com/rpajarola/mirrortools/mirror"
 
@@ -44,6 +45,11 @@ import (
 	_ "github.com/rpajarola/mirrortools/imap"
 	_ "github.com/rpajarola/mirrortools/rsync"
 )
+
+// probeGitHTTP checks whether an http(s):// URL that didn't match git by
+// syntax alone is nevertheless a Git repository. Tests replace it to stay
+// offline.
+var probeGitHTTP = git.ProbeHTTP
 
 func usage(w io.Writer) {
 	fmt.Fprintf(w, "usage: %s [<method>] [flags] <source> [<destdir>]\n\n", os.Args[0])
@@ -139,6 +145,25 @@ func resolve(args []string, cfg *config, stderr io.Writer) (*invocation, error) 
 		return nil, errUsage
 	}
 	inv.source = rest[0]
+	if m.Name == "http" && (git.Match(inv.source) || probeGitHTTP(context.Background(), inv.source)) {
+		if gm, ok := mirror.Get("git"); ok {
+			m, inv.method, inv.detected = gm, gm, true
+			fs = flag.NewFlagSet(m.Name, flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			inv.flags, inv.run = fs, m.SetupFlags(fs)
+			mc = cfg.Methods[m.Name]
+			if mc != nil {
+				for name, value := range mc.Flags {
+					if fs.Lookup(name) == nil {
+						return nil, fmt.Errorf("config file: [%s] %s: %s has no flag -%s", m.Name, name, m.Name, name)
+					}
+					if err := fs.Set(name, value); err != nil {
+						return nil, fmt.Errorf("config file: [%s] %s: %v", m.Name, name, err)
+					}
+				}
+			}
+		}
+	}
 	switch {
 	case len(rest) == 2:
 		inv.dest = rest[1]

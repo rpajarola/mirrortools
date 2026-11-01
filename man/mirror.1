@@ -53,6 +53,19 @@ URLs
 and
 .Li ftps://
 URLs
+.It Sx git
+.Li git://
+and
+.Li ssh://
+URLs,
+.Sm off
+.Li git@ Ar host : Ar path ,
+.Sm on
+.Li *.git
+URLs, and Git repositories served over
+.Li http://
+or
+.Li https://
 .It Sx gopher
 .Li gopher://
 URLs
@@ -170,6 +183,29 @@ List every directory again, and download files whose size or
 modification time changed, files that are missing locally, and files
 that failed permanently before.
 .El
+.Ss git
+Mirrors a Git repository as a bare clone with
+.Ic git clone --mirror ,
+or updates an existing bare mirror in place with
+.Ic git remote update --prune .
+.Ar source
+is a
+.Li https:// ,
+.Li http:// ,
+.Li git://
+or
+.Li ssh://
+repository URL, or
+.Sm off
+.Op Ar user @
+.Ar host : Ar path .
+.Sm on
+The bare repository lands in
+.Ar destdir Ns / Ns Ar host Ns / Ns Ar path ,
+with any trailing
+.Pa .git
+stripped from
+.Ar path .
 .Ss gopher
 Recursively mirrors a Gopher menu tree.
 .Ar source
@@ -367,6 +403,9 @@ destdir = "~/mirror"
 email = "me@example.com"
 password-file = "~/.config/mirrortools/groupsio-password"
 
+[git]
+destdir = "~/git"
+
 [http]
 destdir = "~/web"
 wait = "1s"
@@ -489,6 +528,7 @@ mirror imap -user me@example.com -password-file ~/.imap-pw \e
     imap.example.com ~/mail
 .Ed
 .Sh SEE ALSO
+.Xr git 1 ,
 .Xr rsync 1 ,
 .Xr ssh 1 ,
 .Xr wget 1

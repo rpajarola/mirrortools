@@ -31,6 +31,8 @@ contents:
     dst: /usr/share/doc/mirrortools/archiveorg.md
   - src: ftpmirror/README.md
     dst: /usr/share/doc/mirrortools/ftp.md
+  - src: git/README.md
+    dst: /usr/share/doc/mirrortools/git.md
   - src: gopher/README.md
     dst: /usr/share/doc/mirrortools/gopher.md
   - src: gphotos/README.md

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"io"
@@ -8,6 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 )
+
+func init() {
+	probeGitHTTP = func(context.Context, string) bool { return false }
+}
 
 func TestDetect(t *testing.T) {
 	for _, tc := range []struct{ args, method string }{
@@ -18,6 +23,11 @@ func TestDetect(t *testing.T) {
 		{"https://example.com/pub/", "http"},
 		{"http://archive.org/", "http"},
 		{"https://groups.io/", "http"},
+		{"https://github.com/rpajarola/mirrortools", "git"},
+		{"https://example.com/sub/repo.git", "git"},
+		{"git://git.example.com/repo.git", "git"},
+		{"ssh://git@example.com/repo.git", "git"},
+		{"git@github.com:rpajarola/mirrortools.git", "git"},
 		{"ftp://ftp.example.com/pub/", "ftp"},
 		{"ftps://ftp.example.com/pub/", "ftp"},
 		{"gopher://gopher.example.com/1/", "gopher"},
@@ -44,6 +54,7 @@ func TestResolveArgs(t *testing.T) {
 	cfg := &config{
 		DestDir: "/m",
 		Methods: map[string]*methodConfig{
+			"git":      {DestDir: "/git"},
 			"http":     {Flags: map[string]string{"wait": "2s"}},
 			"groupsio": {DestDir: "/groups", Flags: map[string]string{"email": "me@example.com"}},
 		},
@@ -57,6 +68,10 @@ func TestResolveArgs(t *testing.T) {
 		{[]string{"-update", "https://example.com/a/", "/d"}, "http", "https://example.com/a/", "/d", true, false},
 		{[]string{"-wait", "1s", "https://example.com/a/"}, "http", "https://example.com/a/", "/m", true, true},
 		{[]string{"http", "https://archive.org/details/x"}, "http", "https://archive.org/details/x", "/m", false, true},
+		{[]string{"git", "https://example.com/r.git"}, "git", "https://example.com/r.git", "/git", false, true},
+		{[]string{"https://github.com/rpajarola/mirrortools"}, "git", "https://github.com/rpajarola/mirrortools", "/git", true, true},
+		{[]string{"http", "https://github.com/rpajarola/mirrortools"}, "git", "https://github.com/rpajarola/mirrortools", "/git", true, true},
+		{[]string{"http", "https://example.com/r.git", "/d"}, "git", "https://example.com/r.git", "/d", true, false},
 		{[]string{"https://groups.io/g/xyz"}, "groupsio", "https://groups.io/g/xyz", "/groups", true, true},
 		{[]string{"gphotos", "me@gmail.com"}, "gphotos", "me@gmail.com", "/m/gphotos/me@gmail.com", false, true},
 		{[]string{"gphotos", "me@gmail.com", "/p"}, "gphotos", "me@gmail.com", "/p", false, false},
@@ -77,6 +92,24 @@ func TestResolveArgs(t *testing.T) {
 			t.Errorf("%q: got %s %s %s (detected %v, default dest %v), want %s %s %s (%v, %v)", tc.args,
 				inv.method.Name, inv.source, inv.dest, inv.detected, inv.defaultDest,
 				tc.method, tc.src, dest, tc.detected, tc.defaulted)
+		}
+	}
+
+	// Probe-based git detection for arbitrary HTTP(S) URLs without .git suffix.
+	probeGitHTTP = func(_ context.Context, u string) bool { return u == "https://git.example.com/user/repo" }
+	defer func() { probeGitHTTP = func(context.Context, string) bool { return false } }()
+	for _, args := range [][]string{
+		{"https://git.example.com/user/repo"},
+		{"http", "https://git.example.com/user/repo"},
+	} {
+		inv, err := resolve(args, cfg, io.Discard)
+		if err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+		wantDest := filepath.FromSlash("/git")
+		if inv.method.Name != "git" || inv.dest != wantDest || !inv.detected || !inv.defaultDest {
+			t.Errorf("%q: got method=%s dest=%s detected=%v defaultDest=%v, want git %s true true",
+				args, inv.method.Name, inv.dest, inv.detected, inv.defaultDest, wantDest)
 		}
 	}
 }
@@ -130,6 +163,9 @@ func TestLoadConfig(t *testing.T) {
 	os.WriteFile(p, []byte(`
 destdir = "~/mirror"
 
+[git]
+destdir = "/git"
+
 [groupsio]
 email = "me@example.com"
 password-file = "~/.groupsio-pw"
@@ -145,6 +181,9 @@ update = true
 	}
 	if want := filepath.Join(home, "mirror"); cfg.DestDir != want {
 		t.Errorf("destdir: got %q, want %q", cfg.DestDir, want)
+	}
+	if gm := cfg.Methods["git"]; gm == nil || gm.DestDir != "/git" {
+		t.Errorf("git: got %+v", gm)
 	}
 	g := cfg.Methods["groupsio"]
 	if g == nil || g.Flags["email"] != "me@example.com" || g.Flags["password-file"] != filepath.Join(home, ".groupsio-pw") {
