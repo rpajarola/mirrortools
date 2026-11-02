@@ -1,6 +1,8 @@
 // Package git mirrors a remote Git repository into a local directory as a
-// bare mirror clone (`git clone --mirror`), or updates an existing bare
-// mirror in place (`git remote update --prune`).
+// working-tree clone (`git clone`), or updates an existing clone in place
+// (`git fetch --prune --tags` and fast-forwarding the checked-out branch).
+// An existing bare clone at the target path is converted to a non-bare
+// working-tree clone automatically without re-downloading objects.
 //
 // It registers itself as the "git" method with mirrortools' mirror package,
 // so it's normally driven through the mirror CLI:
@@ -9,7 +11,7 @@
 //	mirror https://github.com/user/repo ./mirror
 //	mirror git@github.com:user/repo.git ./mirror
 //
-// The bare repository lands at <destDir>/<host>/<path> (with any trailing
+// The repository lands at <destDir>/<host>/<path> (with any trailing
 // ".git" stripped from <path>, so https://host/user/repo and
 // https://host/user/repo.git and git@host:user/repo.git all update the same
 // local mirror).
@@ -41,7 +43,7 @@ func init() {
 		Name: "git",
 		Source: "a git repository URL: https://, http://, git://, ssh://, " +
 			"or [user@]host:path",
-		Describe: "mirror a git repository as a bare clone (`git clone --mirror` / `git remote update`)",
+		Describe: "mirror a git repository (`git clone` / `git fetch` + fast-forward)",
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			return func(ctx context.Context, source, destDir string) error {
 				return Mirror(ctx, source, destDir)
@@ -228,21 +230,28 @@ func ProbeHTTP(ctx context.Context, rawURL string) bool {
 	return bytes.HasPrefix(headBody, []byte("ref: refs/"))
 }
 
-// Mirror clones source as a bare mirror repository into
-// <destDir>/<host>/<path> if not already present, or updates the existing
-// bare repository in place with `git remote update --prune`.
+// Mirror clones source as a working-tree repository into
+// <destDir>/<host>/<path> if not already present, or updates an existing
+// clone in place. If <destDir>/<host>/<path> is a bare repository (for
+// example from an earlier `git clone --mirror`), it is converted in place to
+// a non-bare working-tree clone without re-downloading objects before
+// updating.
 func Mirror(ctx context.Context, source, destDir string) error {
 	repoDir, err := localPath(destDir, source)
 	if err != nil {
 		return err
 	}
 
-	if isBareRepo(repoDir) {
-		log.Printf("git: updating %s in %s", source, repoDir)
-		if err := runGit(ctx, "-C", repoDir, "remote", "set-url", "origin", "--", source); err != nil {
+	if isGitDir(repoDir) && !isGitDir(filepath.Join(repoDir, ".git")) {
+		log.Printf("git: converting bare repository %s to working-tree clone", repoDir)
+		if err := convertBareToWorktree(ctx, repoDir); err != nil {
 			return err
 		}
-		if err := runGit(ctx, "-C", repoDir, "remote", "update", "--prune"); err != nil {
+	}
+
+	if isGitDir(filepath.Join(repoDir, ".git")) {
+		log.Printf("git: updating %s in %s", source, repoDir)
+		if err := updateWorktree(ctx, repoDir, source); err != nil {
 			return err
 		}
 		log.Printf("git: done: %s", repoDir)
@@ -257,7 +266,7 @@ func Mirror(ctx context.Context, source, destDir string) error {
 	if err := os.RemoveAll(tmpDir); err != nil {
 		return fmt.Errorf("git: %w", err)
 	}
-	if err := runGit(ctx, "clone", "--mirror", "--", source, tmpDir); err != nil {
+	if err := runGit(ctx, "clone", "--", source, tmpDir); err != nil {
 		os.RemoveAll(tmpDir)
 		return err
 	}
@@ -272,6 +281,89 @@ func Mirror(ctx context.Context, source, destDir string) error {
 	return nil
 }
 
+// convertBareToWorktree moves a bare repository at repoDir into repoDir/.git,
+// reconfigures it as a standard non-bare clone, turns non-HEAD local branches
+// from `git clone --mirror` into remote-tracking refs under
+// refs/remotes/origin/*, and checks out HEAD into the working tree.
+func convertBareToWorktree(ctx context.Context, repoDir string) error {
+	tmpDir := repoDir + tmpSuffix
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("git: %w", err)
+	}
+	if err := os.Rename(repoDir, tmpDir); err != nil {
+		return fmt.Errorf("git: %w", err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		_ = os.Rename(tmpDir, repoDir)
+		return fmt.Errorf("git: %w", err)
+	}
+	if err := os.Rename(tmpDir, filepath.Join(repoDir, ".git")); err != nil {
+		_ = os.Remove(repoDir)
+		_ = os.Rename(tmpDir, repoDir)
+		return fmt.Errorf("git: %w", err)
+	}
+
+	if err := runGit(ctx, "-C", repoDir, "config", "--bool", "core.bare", "false"); err != nil {
+		return err
+	}
+	_ = exec.CommandContext(ctx, "git", "-C", repoDir, "config", "--unset-all", "remote.origin.mirror").Run()
+	if err := runGit(ctx, "-C", repoDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return err
+	}
+
+	headRef, _ := gitOutput(ctx, "-C", repoDir, "symbolic-ref", "--quiet", "HEAD")
+	headBranch := strings.TrimPrefix(headRef, "refs/heads/")
+
+	refsOut, err := gitOutput(ctx, "-C", repoDir, "for-each-ref", "--format=%(refname:lstrip=2) %(objectname)", "refs/heads")
+	if err == nil && refsOut != "" {
+		for _, line := range strings.Split(refsOut, "\n") {
+			branch, sha, ok := strings.Cut(strings.TrimSpace(line), " ")
+			if !ok || branch == "" || sha == "" {
+				continue
+			}
+			_ = runGit(ctx, "-C", repoDir, "update-ref", "refs/remotes/origin/"+branch, sha)
+			if branch != headBranch {
+				_ = runGit(ctx, "-C", repoDir, "branch", "-D", branch)
+			}
+		}
+	}
+
+	if hasCommit(ctx, repoDir, "HEAD") {
+		if err := runGit(ctx, "-C", repoDir, "checkout", "-f", "HEAD"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateWorktree fetches all remote branches and tags (pruning deleted
+// remote branches) and fast-forwards the checked-out branch if its remote
+// counterpart exists.
+func updateWorktree(ctx context.Context, repoDir, source string) error {
+	if err := runGit(ctx, "-C", repoDir, "remote", "set-url", "origin", "--", source); err != nil {
+		return err
+	}
+	if err := runGit(ctx, "-C", repoDir, "fetch", "--prune", "--tags", "origin"); err != nil {
+		return err
+	}
+
+	headRef, err := gitOutput(ctx, "-C", repoDir, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		return nil // detached HEAD; fetch is enough
+	}
+	branch := strings.TrimPrefix(headRef, "refs/heads/")
+	remoteRef := "refs/remotes/origin/" + branch
+	if !hasCommit(ctx, repoDir, remoteRef) {
+		return nil
+	}
+
+	if !hasCommit(ctx, repoDir, "HEAD") {
+		return runGit(ctx, "-C", repoDir, "checkout", "-B", branch, "--track", "origin/"+branch)
+	}
+	_ = runGit(ctx, "-C", repoDir, "branch", "--set-upstream-to=origin/"+branch, branch)
+	return runGit(ctx, "-C", repoDir, "merge", "--ff-only", remoteRef)
+}
+
 func runGit(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Stdout = os.Stderr
@@ -282,9 +374,22 @@ func runGit(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// isBareRepo reports whether dir looks like an initialized bare Git
-// repository (has a regular HEAD file and objects/ and refs/ directories).
-func isBareRepo(dir string) bool {
+func gitOutput(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func hasCommit(ctx context.Context, repoDir, rev string) bool {
+	return exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "--verify", "-q", rev+"^{commit}").Run() == nil
+}
+
+// isGitDir reports whether dir looks like a Git directory (either a bare
+// repository root or a working-tree clone's .git subdirectory): it has a
+// regular HEAD file and objects/ and refs/ directories.
+func isGitDir(dir string) bool {
 	head, err := os.Stat(filepath.Join(dir, "HEAD"))
 	if err != nil || !head.Mode().IsRegular() {
 		return false

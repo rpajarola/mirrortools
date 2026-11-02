@@ -469,8 +469,8 @@ func TestMirrorDelegatesGitRepo(t *testing.T) {
 		t.Fatalf("Mirror(git URL without .git): %v", err)
 	}
 	host := strings.TrimPrefix(srv.URL, "http://")
-	if _, err := os.Stat(filepath.Join(destDir, host, "sub", "repo", "HEAD")); err != nil {
-		t.Errorf("expected bare git mirror at %s/sub/repo: %v", host, err)
+	if _, err := os.Stat(filepath.Join(destDir, host, "sub", "repo", ".git", "HEAD")); err != nil {
+		t.Errorf("expected git mirror at %s/sub/repo: %v", host, err)
 	}
 	if _, err := os.Stat(filepath.Join(destDir, dbFileName)); !os.IsNotExist(err) {
 		t.Errorf("should not leave %s behind when delegating to git", dbFileName)

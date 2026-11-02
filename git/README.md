@@ -1,7 +1,10 @@
 # git
 
-Mirrors a remote Git repository as a bare clone (`git clone --mirror`), or
-updates an existing bare mirror in place (`git remote update --prune`).
+Mirrors a remote Git repository as a working-tree clone (`git clone`), or
+updates an existing clone in place (`git fetch --prune --tags` and
+fast-forwarding the checked-out branch). If the target directory is an
+existing bare clone (such as from `git clone --mirror`), it is converted in
+place to a non-bare working-tree clone without re-downloading objects.
 Registers itself as the `git` method of the [`mirror` CLI](../README.md).
 
 ## Usage
@@ -17,7 +20,7 @@ Accepted sources:
 - `ssh://` and `git+ssh://` URLs
 - SCP-style `[user@]host:path` (e.g. `git@github.com:user/repo.git`)
 
-The bare repository lands at `<destdir>/<host>/<path>`, with any trailing
+The repository lands at `<destdir>/<host>/<path>`, with any trailing
 `.git` stripped from `<path>` so that `https://host/user/repo`,
 `https://host/user/repo.git` and `git@host:user/repo.git` all update the
 same local mirror.
@@ -40,5 +43,5 @@ detected automatically:
 Initial clones are written to `<destdir>/<host>/<path>.gitmirror-tmp` and
 renamed into place once complete, so an interrupted clone never leaves a
 half-initialized repository at the real path. Re-running `mirror` on an
-already-cloned repository runs `git remote update --prune` to fetch all
-updated refs and prune deleted ones.
+already-cloned repository runs `git fetch --prune --tags` and fast-forwards
+the checked-out branch.

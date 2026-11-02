@@ -184,10 +184,13 @@ modification time changed, files that are missing locally, and files
 that failed permanently before.
 .El
 .Ss git
-Mirrors a Git repository as a bare clone with
-.Ic git clone --mirror ,
-or updates an existing bare mirror in place with
-.Ic git remote update --prune .
+Mirrors a Git repository with
+.Ic git clone ,
+or updates an existing clone in place with
+.Ic git fetch --prune --tags
+and fast-forwards the checked-out branch.
+An existing bare clone at the target path is converted in place to a
+non-bare working-tree clone without re-downloading objects.
 .Ar source
 is a
 .Li https:// ,
@@ -200,7 +203,7 @@ repository URL, or
 .Op Ar user @
 .Ar host : Ar path .
 .Sm on
-The bare repository lands in
+The repository lands in
 .Ar destdir Ns / Ns Ar host Ns / Ns Ar path ,
 with any trailing
 .Pa .git

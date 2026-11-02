@@ -208,13 +208,16 @@ func TestMirrorSmartHTTP(t *testing.T) {
 
 	host := strings.TrimPrefix(srv.URL, "http://")
 	mirrorDir := filepath.Join(destDir, host, "sub", "repo")
-	if !isBareRepo(mirrorDir) {
-		t.Fatalf("expected bare repo at %s", mirrorDir)
+	if !isGitDir(filepath.Join(mirrorDir, ".git")) {
+		t.Fatalf("expected working-tree repo at %s", mirrorDir)
+	}
+	if got, err := os.ReadFile(filepath.Join(mirrorDir, "README.md")); err != nil || string(got) != "hello\n" {
+		t.Errorf("README.md = %q, %v; want %q", got, err, "hello\n")
 	}
 	wantMain := gitCmd(t, bareDir, "rev-parse", "refs/heads/main")
-	gotMain := gitCmd(t, mirrorDir, "rev-parse", "refs/heads/main")
+	gotMain := gitCmd(t, mirrorDir, "rev-parse", "HEAD")
 	if gotMain != wantMain {
-		t.Errorf("refs/heads/main = %s, want %s", gotMain, wantMain)
+		t.Errorf("HEAD = %s, want %s", gotMain, wantMain)
 	}
 	gotTag := gitCmd(t, mirrorDir, "rev-parse", "refs/tags/v1.0")
 	if gotTag != wantMain {
@@ -222,8 +225,8 @@ func TestMirrorSmartHTTP(t *testing.T) {
 	}
 
 	// Advance main, delete topic on remote, then re-run Mirror using the
-	// .git URL: it should update the same local mirror directory and prune
-	// the deleted branch.
+	// .git URL: it should update the same local mirror directory,
+	// fast-forward the working tree, and prune the deleted remote branch.
 	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("updated\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +237,67 @@ func TestMirrorSmartHTTP(t *testing.T) {
 		t.Fatalf("update Mirror: %v", err)
 	}
 	wantMain2 := gitCmd(t, bareDir, "rev-parse", "refs/heads/main")
-	gotMain2 := gitCmd(t, mirrorDir, "rev-parse", "refs/heads/main")
+	gotMain2 := gitCmd(t, mirrorDir, "rev-parse", "HEAD")
 	if gotMain2 != wantMain2 || gotMain2 == wantMain {
-		t.Errorf("after update: refs/heads/main = %s, want %s", gotMain2, wantMain2)
+		t.Errorf("after update: HEAD = %s, want %s", gotMain2, wantMain2)
+	}
+	if got, err := os.ReadFile(filepath.Join(mirrorDir, "README.md")); err != nil || string(got) != "updated\n" {
+		t.Errorf("after update: README.md = %q, %v; want %q", got, err, "updated\n")
+	}
+	if err := exec.Command("git", "-C", mirrorDir, "rev-parse", "--verify", "refs/remotes/origin/topic").Run(); err == nil {
+		t.Error("deleted branch refs/remotes/origin/topic should have been pruned")
+	}
+}
+
+func TestConvertBareToWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	workDir, bareDir := initTestRepo(t, root)
+	srv := newSmartGitServer(t, root)
+	defer srv.Close()
+
+	ctx := context.Background()
+	repoURL := srv.URL + "/sub/repo.git"
+	destDir := t.TempDir()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	mirrorDir := filepath.Join(destDir, host, "sub", "repo")
+	if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate mirrorDir as a bare `git clone --mirror` repository.
+	gitCmd(t, "", "clone", "--mirror", "-q", repoURL, mirrorDir)
+	if !isGitDir(mirrorDir) || isGitDir(filepath.Join(mirrorDir, ".git")) {
+		t.Fatalf("expected initial bare repo at %s", mirrorDir)
+	}
+
+	// Advance remote main and delete topic before running Mirror.
+	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("converted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "commit", "-q", "-a", "-m", "second")
+	gitCmd(t, workDir, "push", "-q", "origin", "main", ":topic")
+
+	if err := Mirror(ctx, repoURL, destDir); err != nil {
+		t.Fatalf("Mirror on bare repo: %v", err)
+	}
+	if !isGitDir(filepath.Join(mirrorDir, ".git")) {
+		t.Fatalf("expected converted working-tree repo at %s", mirrorDir)
+	}
+	if got, err := os.ReadFile(filepath.Join(mirrorDir, "README.md")); err != nil || string(got) != "converted\n" {
+		t.Errorf("README.md = %q, %v; want %q", got, err, "converted\n")
+	}
+	wantMain := gitCmd(t, bareDir, "rev-parse", "refs/heads/main")
+	if got := gitCmd(t, mirrorDir, "rev-parse", "HEAD"); got != wantMain {
+		t.Errorf("HEAD = %s, want %s", got, wantMain)
 	}
 	if err := exec.Command("git", "-C", mirrorDir, "rev-parse", "--verify", "refs/heads/topic").Run(); err == nil {
-		t.Error("deleted branch refs/heads/topic should have been pruned")
+		t.Error("non-HEAD branch refs/heads/topic from bare mirror should have been removed")
+	}
+	if err := exec.Command("git", "-C", mirrorDir, "rev-parse", "--verify", "refs/remotes/origin/topic").Run(); err == nil {
+		t.Error("deleted remote branch refs/remotes/origin/topic should have been pruned")
 	}
 }
 
@@ -265,7 +323,7 @@ func TestMirrorDumbHTTP(t *testing.T) {
 	}
 	host := strings.TrimPrefix(srv.URL, "http://")
 	mirrorDir := filepath.Join(destDir, host, "sub", "repo")
-	if !isBareRepo(mirrorDir) {
-		t.Fatalf("expected bare repo at %s", mirrorDir)
+	if !isGitDir(filepath.Join(mirrorDir, ".git")) {
+		t.Fatalf("expected working-tree repo at %s", mirrorDir)
 	}
 }
