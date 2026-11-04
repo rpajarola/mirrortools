@@ -65,6 +65,7 @@ func usage(w io.Writer) {
 		fmt.Fprintf(w, "  %-10s source: %s\n", "", m.Source)
 	}
 	fmt.Fprintf(w, "\nwithout a <destdir>, the destdir from the config file is used: %s\n", configPath())
+	fmt.Fprintf(w, "run `%s queue -h` for queue management with mirrord\n", os.Args[0])
 	fmt.Fprintf(w, "run `%s <method> -h` for method-specific flags, `%s version` for the version\n", os.Args[0], os.Args[0])
 }
 
@@ -207,6 +208,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", os.Args[0], err)
 		os.Exit(2)
 	}
+
+	switch os.Args[1] {
+	case "queue":
+		queueMain(os.Args[2:], cfg)
+		return
+	case "submit":
+		submitMain(os.Args[2:], cfg)
+		return
+	}
+
 	inv, err := resolve(os.Args[1:], cfg, os.Stderr)
 	switch {
 	case errors.Is(err, flag.ErrHelp):

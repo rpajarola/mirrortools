@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mirrord — mirrortools daemon</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface-hover: #334155;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --quarantine: #d946ef;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+    .badge {
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 9999px;
+      letter-spacing: 0.5px;
+    }
+    .badge-live { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .badge-offline { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .btn {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn:hover { background: var(--surface-hover); }
+    .btn-primary { background: var(--primary); color: #000; border-color: var(--primary); }
+    .btn-primary:hover { background: var(--primary-hover); color: #fff; }
+    .btn-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); border-color: rgba(239, 68, 68, 0.4); }
+    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); border-color: rgba(245, 158, 11, 0.4); }
+    .btn-warning:hover { background: var(--warning); color: #000; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .submit-grid {
+      display: grid;
+      grid-template-columns: 2fr 1.5fr 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+    @media (max-width: 900px) {
+      .submit-grid { grid-template-columns: 1fr; }
+    }
+    input, select, textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 9px 12px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus, textarea:focus { border-color: var(--primary); }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+      overflow-x: auto;
+    }
+    .tab {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tab.active { background: var(--surface); color: var(--text); }
+    .tab-badge {
+      background: var(--bg);
+      padding: 1px 6px;
+      border-radius: 9999px;
+      font-size: 11px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: left;
+      padding: 10px 12px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+    }
+    td {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    .state-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .state-queued { background: rgba(148, 163, 184, 0.2); color: var(--text-muted); }
+    .state-running { background: rgba(56, 189, 248, 0.2); color: var(--primary); }
+    .state-paused { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+    .state-completed { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .state-failed { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+    .state-quarantined { background: rgba(217, 70, 239, 0.2); color: var(--quarantine); }
+    .state-cancelled { background: rgba(100, 116, 139, 0.2); color: #94a3b8; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+    .method-tag {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      color: #38bdf8;
+    }
+    .actions-cell {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    /* Log drawer */
+    .drawer {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 600px;
+      max-width: 90vw;
+      background: #090d16;
+      border-left: 1px solid var(--border);
+      box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.2s ease-in-out;
+      z-index: 100;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface);
+    }
+    .drawer-body {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      background: #020617;
+      color: #e2e8f0;
+    }
+    .drawer-footer {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface);
+    }
+    .log-line { margin-bottom: 2px; }
+    .log-stdout { color: #cbd5e1; }
+    .log-stderr { color: #f87171; }
+    .log-info { color: #38bdf8; }
+    .overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: none;
+      z-index: 90;
+    }
+    .overlay.open { display: block; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <h1>mirrord</h1>
+      <span id="liveStatus" class="badge badge-offline">Connecting</span>
+    </div>
+    <div class="controls">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:12px;color:var(--text-muted)">Workers:</span>
+        <button class="btn" onclick="adjustConcurrency(-1)">-</button>
+        <span id="concurrencyVal" style="font-weight:700;font-size:14px;min-width:18px;text-align:center;">2</span>
+        <button class="btn" onclick="adjustConcurrency(1)">+</button>
+      </div>
+      <button id="pauseQueueBtn" class="btn btn-warning" onclick="toggleQueuePause()">Pause Queue</button>
+      <button class="btn" onclick="openConfigModal()">Config</button>
+    </div>
+  </header>
+
+  <!-- Submit bar -->
+  <div class="card">
+    <div class="card-title">Enqueue Mirror Job</div>
+    <form id="submitForm" onsubmit="submitJob(event)" class="submit-grid">
+      <input type="text" id="sourceInput" placeholder="Source URL or handle (e.g. https://sourceforge.net/projects/name/)" required />
+      <input type="text" id="destInput" placeholder="Destination directory (optional; default from config)" />
+      <input type="text" id="flagsInput" placeholder="Flags (e.g. -wait 1s)" />
+      <button type="submit" class="btn btn-primary">Enqueue Job</button>
+    </form>
+  </div>
+
+  <!-- Job Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="setTab('all')">All <span class="tab-badge" id="count-all">0</span></button>
+    <button class="tab" onclick="setTab('running')">Active <span class="tab-badge" id="count-running">0</span></button>
+    <button class="tab" onclick="setTab('queued')">Queued <span class="tab-badge" id="count-queued">0</span></button>
+    <button class="tab" onclick="setTab('quarantined')">Quarantined <span class="tab-badge" id="count-quarantined">0</span></button>
+    <button class="tab" onclick="setTab('failed')">Failed <span class="tab-badge" id="count-failed">0</span></button>
+    <button class="tab" onclick="setTab('completed')">Completed <span class="tab-badge" id="count-completed">0</span></button>
+  </div>
+
+  <!-- Jobs table -->
+  <div class="card" style="padding:0; overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:50px;">ID</th>
+          <th style="width:110px;">Method</th>
+          <th>Source & Destination</th>
+          <th style="width:110px;">State</th>
+          <th style="width:130px;">Timing</th>
+          <th style="width:200px; text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="jobsTable">
+        <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">Loading jobs...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Log Drawer -->
+  <div id="drawerOverlay" class="overlay" onclick="closeLogDrawer()"></div>
+  <div id="logDrawer" class="drawer">
+    <div class="drawer-header">
+      <div>
+        <h3 id="drawerTitle">Job Logs</h3>
+        <span id="drawerSubtitle" style="font-size:11px;color:var(--text-muted)"></span>
+      </div>
+      <button class="btn" onclick="closeLogDrawer()">✕</button>
+    </div>
+    <div id="drawerBody" class="drawer-body"></div>
+    <div class="drawer-footer">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);">
+        <input type="checkbox" id="autoScrollCheck" checked style="width:auto;" /> Auto-scroll
+      </label>
+      <button class="btn" onclick="clearDrawerLogs()">Clear</button>
+    </div>
+  </div>
+
+  <!-- Config Modal (Simple drawer-like) -->
+  <div id="configModal" class="drawer" style="width:700px;">
+    <div class="drawer-header">
+      <h3>Configuration (~/.config/mirrortools/config.toml)</h3>
+      <button class="btn" onclick="closeConfigModal()">✕</button>
+    </div>
+    <div style="flex:1;padding:16px;display:flex;flex-direction:column;">
+      <textarea id="configRawText" style="flex:1;font-family:monospace;resize:none;margin-bottom:12px;"></textarea>
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button class="btn" onclick="closeConfigModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveConfig()">Save & Reload</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentTab = 'all';
+    let currentConcurrency = 2;
+    let isPaused = false;
+    let activeLogEventSource = null;
+    let activeLogJobID = null;
+
+    async function fetchJSON(url, opts = {}) {
+      const res = await fetch(url, opts);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+      }
+      return res.json();
+    }
+
+    async function loadStatus() {
+      try {
+        const st = await fetchJSON('/api/v1/queue/status');
+        isPaused = st.paused;
+        currentConcurrency = st.concurrency;
+        document.getElementById('concurrencyVal').innerText = st.concurrency;
+        const pauseBtn = document.getElementById('pauseQueueBtn');
+        if (isPaused) {
+          pauseBtn.innerText = 'Resume Queue';
+          pauseBtn.className = 'btn btn-primary';
+        } else {
+          pauseBtn.innerText = 'Pause Queue';
+          pauseBtn.className = 'btn btn-warning';
+        }
+        // Update counts
+        const counts = st.counts || {};
+        let total = 0;
+        for (const [k, v] of Object.entries(counts)) {
+          total += v;
+          const el = document.getElementById(`count-${k}`);
+          if (el) el.innerText = v;
+        }
+        document.getElementById('count-all').innerText = total;
+      } catch (err) {
+        console.error('Failed to load status:', err);
+      }
+    }
+
+    async function loadJobs() {
+      try {
+        let url = '/api/v1/jobs?limit=100';
+        if (currentTab !== 'all') {
+          url += `&state=${currentTab}`;
+        }
+        const jobs = await fetchJSON(url);
+        renderJobs(jobs);
+      } catch (err) {
+        console.error('Failed to load jobs:', err);
+      }
+    }
+
+    function renderJobs(jobs) {
+      const tbody = document.getElementById('jobsTable');
+      if (!jobs || jobs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">No jobs in this view.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = jobs.map(j => {
+        let timing = '';
+        if (j.state === 'running' && j.started_at) {
+          timing = `Running (${timeAgo(j.started_at)})`;
+        } else if (j.finished_at) {
+          timing = `Finished ${timeAgo(j.finished_at)} ago`;
+        } else {
+          timing = `Created ${timeAgo(j.created_at)} ago`;
+        }
+
+        let actionBtns = `<button class="btn" onclick="openLogDrawer(${j.id}, '${escapeHTML(j.source)}')">Logs</button>`;
+
+        if (j.state === 'running') {
+          actionBtns += `<button class="btn btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
+        } else if (j.state === 'queued') {
+          actionBtns += `<button class="btn btn-warning" onclick="quarantineJob(${j.id})">Quarantine</button>`;
+          actionBtns += `<button class="btn btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
+        } else if (j.state === 'quarantined') {
+          actionBtns += `<button class="btn btn-primary" onclick="unquarantineJob(${j.id})">Retry</button>`;
+          actionBtns += `<button class="btn btn-danger" onclick="deleteJob(${j.id})">Dismiss</button>`;
+        } else if (j.state === 'failed') {
+          actionBtns += `<button class="btn btn-primary" onclick="retryJob(${j.id})">Retry</button>`;
+          actionBtns += `<button class="btn" onclick="deleteJob(${j.id})">Delete</button>`;
+        } else if (j.state === 'completed' || j.state === 'cancelled') {
+          actionBtns += `<button class="btn" onclick="retryJob(${j.id})">Re-run</button>`;
+          actionBtns += `<button class="btn" onclick="deleteJob(${j.id})">Delete</button>`;
+        }
+
+        let extraNote = '';
+        if (j.state === 'quarantined' && j.quarantine_reason) {
+          extraNote = `<div style="font-size:11px;color:var(--quarantine);margin-top:4px;">⚠️ ${escapeHTML(j.quarantine_reason)}</div>`;
+        } else if (j.state === 'failed' && j.last_error) {
+          extraNote = `<div style="font-size:11px;color:var(--danger);margin-top:4px;">⚠️ ${escapeHTML(j.last_error)}</div>`;
+        }
+
+        return `
+          <tr>
+            <td class="mono">#${j.id}</td>
+            <td><span class="method-tag mono">${escapeHTML(j.method || 'auto')}</span></td>
+            <td>
+              <div style="font-weight:600;word-break:break-all;">${escapeHTML(j.source)}</div>
+              <div style="font-size:11px;color:var(--text-muted);word-break:break-all;">↳ ${escapeHTML(j.dest_dir || '')}</div>
+              ${extraNote}
+            </td>
+            <td><span class="state-pill state-${j.state}">${j.state}</span></td>
+            <td style="font-size:12px;color:var(--text-muted);">${timing}</td>
+            <td><div class="actions-cell">${actionBtns}</div></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return '';
+      const seconds = Math.floor((new Date() - new Date(dateStr)) / 1000);
+      if (seconds < 60) return `${Math.max(1, seconds)}s`;
+      const mins = Math.floor(seconds / 60);
+      if (mins < 60) return `${mins}m`;
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return `${hrs}h ${mins % 60}m`;
+      return `${Math.floor(hrs / 24)}d`;
+    }
+
+    function escapeHTML(str) {
+      return (str || '').replace(/[&<>'"]/g, tag => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[tag] || tag));
+    }
+
+    function setTab(tab) {
+      currentTab = tab;
+      document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+      event.target.closest('.tab').classList.add('active');
+      loadJobs();
+    }
+
+    async function toggleQueuePause() {
+      const endpoint = isPaused ? '/api/v1/queue/resume' : '/api/v1/queue/pause';
+      await fetchJSON(endpoint, { method: 'POST' });
+      await loadStatus();
+      await loadJobs();
+    }
+
+    async function adjustConcurrency(delta) {
+      const next = Math.max(1, currentConcurrency + delta);
+      if (next === currentConcurrency) return;
+      await fetchJSON('/api/v1/queue/concurrency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ concurrency: next })
+      });
+      await loadStatus();
+    }
+
+    async function submitJob(e) {
+      e.preventDefault();
+      const source = document.getElementById('sourceInput').value.trim();
+      const dest_dir = document.getElementById('destInput').value.trim();
+      const flagsRaw = document.getElementById('flagsInput').value.trim();
+
+      const flags = {};
+      if (flagsRaw) {
+        // Simple flag parser e.g. -wait 1s -retries 5
+        const parts = flagsRaw.split(/\s+/);
+        for (let i = 0; i < parts.length; i++) {
+          if (parts[i].startsWith('-')) {
+            const k = parts[i].replace(/^-+/, '');
+            if (i + 1 < parts.length && !parts[i + 1].startsWith('-')) {
+              flags[k] = parts[i + 1];
+              i++;
+            } else {
+              flags[k] = "true";
+            }
+          }
+        }
+      }
+
+      try {
+        await fetchJSON('/api/v1/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source, dest_dir, flags })
+        });
+        document.getElementById('sourceInput').value = '';
+        document.getElementById('flagsInput').value = '';
+        await loadStatus();
+        await loadJobs();
+      } catch (err) {
+        alert('Failed to enqueue job: ' + err.message);
+      }
+    }
+
+    async function cancelJob(id) {
+      if (!confirm(`Cancel job #${id}?`)) return;
+      await fetchJSON(`/api/v1/jobs/${id}/cancel`, { method: 'POST' });
+      loadStatus(); loadJobs();
+    }
+
+    async function retryJob(id) {
+      await fetchJSON(`/api/v1/jobs/${id}/retry`, { method: 'POST' });
+      loadStatus(); loadJobs();
+    }
+
+    async function quarantineJob(id) {
+      const reason = prompt('Enter quarantine reason:', 'manual quarantine via UI');
+      if (reason === null) return;
+      await fetchJSON(`/api/v1/jobs/${id}/quarantine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      loadStatus(); loadJobs();
+    }
+
+    async function unquarantineJob(id) {
+      await fetchJSON(`/api/v1/jobs/${id}/unquarantine`, { method: 'POST' });
+      loadStatus(); loadJobs();
+    }
+
+    async function deleteJob(id) {
+      if (!confirm(`Permanently delete record for job #${id}?`)) return;
+      await fetchJSON(`/api/v1/jobs/${id}`, { method: 'DELETE' });
+      loadStatus(); loadJobs();
+    }
+
+    // Log Drawer & SSE
+    async function openLogDrawer(id, source) {
+      activeLogJobID = id;
+      document.getElementById('drawerTitle').innerText = `Job #${id} Logs`;
+      document.getElementById('drawerSubtitle').innerText = source;
+      document.getElementById('drawerBody').innerHTML = '';
+      document.getElementById('logDrawer').classList.add('open');
+      document.getElementById('drawerOverlay').classList.add('open');
+
+      // Load static logs first
+      try {
+        const logs = await fetchJSON(`/api/v1/jobs/${id}/logs?limit=500`);
+        const body = document.getElementById('drawerBody');
+        logs.forEach(appendLogLine);
+      } catch (e) {}
+
+      // Connect SSE stream
+      if (activeLogEventSource) activeLogEventSource.close();
+      activeLogEventSource = new EventSource(`/api/v1/jobs/${id}/logs/stream`);
+      activeLogEventSource.onmessage = e => {
+        try {
+          const l = JSON.parse(e.data);
+          appendLogLine(l);
+        } catch (err) {}
+      };
+    }
+
+    function appendLogLine(l) {
+      const body = document.getElementById('drawerBody');
+      const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : '';
+      const div = document.createElement('div');
+      div.className = `log-line log-${l.stream}`;
+      div.innerText = `[${time}] [${l.stream}] ${l.message}`;
+      body.appendChild(div);
+
+      if (document.getElementById('autoScrollCheck').checked) {
+        body.scrollTop = body.scrollHeight;
+      }
+    }
+
+    function clearDrawerLogs() {
+      document.getElementById('drawerBody').innerHTML = '';
+    }
+
+    function closeLogDrawer() {
+      if (activeLogEventSource) {
+        activeLogEventSource.close();
+        activeLogEventSource = null;
+      }
+      activeLogJobID = null;
+      document.getElementById('logDrawer').classList.remove('open');
+      document.getElementById('drawerOverlay').classList.remove('open');
+    }
+
+    // Config modal
+    async function openConfigModal() {
+      try {
+        const c = await fetchJSON('/api/v1/config');
+        document.getElementById('configRawText').value = c.raw || '';
+        document.getElementById('configModal').classList.add('open');
+        document.getElementById('drawerOverlay').classList.add('open');
+      } catch (err) {
+        alert('Failed to load config: ' + err.message);
+      }
+    }
+
+    function closeConfigModal() {
+      document.getElementById('configModal').classList.remove('open');
+      document.getElementById('drawerOverlay').classList.remove('open');
+    }
+
+    async function saveConfig() {
+      const raw = document.getElementById('configRawText').value;
+      try {
+        await fetchJSON('/api/v1/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw })
+        });
+        alert('Configuration saved and reloaded.');
+        closeConfigModal();
+        loadStatus();
+      } catch (err) {
+        alert('Error saving configuration: ' + err.message);
+      }
+    }
+
+    // Setup global SSE connection
+    function connectGlobalEvents() {
+      const live = document.getElementById('liveStatus');
+      const es = new EventSource('/api/v1/events');
+      es.onopen = () => {
+        live.className = 'badge badge-live';
+        live.innerText = 'Live';
+      };
+      es.onerror = () => {
+        live.className = 'badge badge-offline';
+        live.innerText = 'Reconnecting';
+      };
+      es.addEventListener('status', e => {
+        loadStatus();
+        loadJobs();
+      });
+      es.onmessage = e => {
+        loadStatus();
+        loadJobs();
+      };
+    }
+
+    // Init
+    loadStatus();
+    loadJobs();
+    connectGlobalEvents();
+    setInterval(loadJobs, 4000);
+  </script>
+</body>
+</html>

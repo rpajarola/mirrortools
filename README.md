@@ -12,8 +12,11 @@ and available from:
   `brew install rpajarola/tap/mirrortools`, or the installer package from a
   release, which needs no Homebrew
 
-All of them install the `mirror` command and its manual page,
-[mirror(1)](https://rpajarola.github.io/apt/mirrortools/mirror.1.html). [packaging](packaging/README.md)
+All of them install the `mirror` command, the `mirrord` daemon service,
+and their manual pages,
+[mirror(1)](https://rpajarola.github.io/apt/mirrortools/mirror.1.html) and
+[mirrord(1)](https://rpajarola.github.io/apt/mirrortools/mirrord.1.html).
+[packaging](packaging/README.md)
 describes what is installed and how the packages are built.
 
 Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@latest`
@@ -22,8 +25,9 @@ Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@lat
 
 - `mirror/` — the top-level library: the `Method`/`Func` interface every
   backend implements, and the registry the CLI uses to find them.
-- `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry.
-- `man/` — the `mirror(1)` manual page.
+- `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry and daemon queue client.
+- `cmd/mirrord/` — the `mirrord` daemon service (queue, workers, Web UI).
+- `man/` — the `mirror(1)` and `mirrord(1)` manual pages.
 - `packaging/` — `.deb`, macOS `.pkg` and Homebrew packaging, built by
   the release workflow. See [`packaging/README.md`](packaging/README.md).
 - `gphotos/` — the Google Photos backend (registers itself as `gphotos`).
@@ -122,6 +126,45 @@ mirror -email you@example.com -password-file pw.txt https://groups.io/g/some-gro
 Run `mirror -h` for the list of available methods, or `mirror <method> -h`
 for a method's flags.
 
+## Daemon & Queue Service (`mirrord`)
+
+`mirrord` runs as a persistent service managing a job queue in SQLite,
+executing mirror tasks with worker concurrency, isolating failing jobs in
+quarantine, and serving a local Unix domain socket and Web UI.
+
+Start the daemon:
+
+```bash
+mirrord -http 127.0.0.1:8080
+# or via systemd: systemctl --user start mirrord
+```
+
+Open `http://127.0.0.1:8080` in your browser for the real-time Web dashboard,
+queue controls, live log streaming, and in-browser config editing.
+
+### Queue CLI
+
+Manage the daemon's queue from the command line using `mirror queue` (or the
+shorthand `mirror submit`):
+
+```bash
+# Submit jobs to the background queue (method and destination auto-detected)
+mirror queue submit https://sourceforge.net/projects/fsd-amoeba/
+mirror submit -wait 1s https://archive.org/details/nasa-audio
+
+# Inspect the queue
+mirror queue list
+mirror queue status 1
+mirror queue logs -f 1           # stream live output
+
+# Queue control
+mirror queue pause               # pause processing
+mirror queue resume              # resume processing
+mirror queue concurrency 4       # adjust worker limit
+mirror queue cancel 1            # cancel a job
+mirror queue retry 1             # retry a failed/quarantined job
+```
+
 ### Config file
 
 `~/.config/mirrortools/config.toml` (or `$XDG_CONFIG_HOME/mirrortools/config.toml`,
@@ -131,6 +174,11 @@ defaults for each method's flags, in [TOML](https://toml.io):
 ```toml
 # Where to mirror when no <destdir> is given.
 destdir = "~/mirror"
+
+# Daemon service settings
+[daemon]
+http = "127.0.0.1:8080"
+concurrency = 3
 
 # A section per method: default values for its flags (without the "-"),
 # and optionally a destdir of its own.

@@ -11,6 +11,15 @@
 .Ar source
 .Op Ar destdir
 .Nm
+.Cm queue
+.Ar subcommand
+.Op Ar arguments
+.Nm
+.Cm submit
+.Op Ar flags
+.Ar source
+.Op Ar destdir
+.Nm
 .Ar method
 .Fl h
 .Nm
@@ -419,6 +428,42 @@ times, 5 by default, when it fails with status 429 or 5xx, a network
 error or a bad checksum, as for
 .Sx archiveorg .
 .El
+.Sh QUEUE MANAGEMENT
+When running alongside the
+.Xr mirrord 1
+daemon service,
+.Nm
+can submit and manage mirror requests in a background queue over a local
+Unix domain socket.
+.Bl -tag -width Ds
+.It Ic mirror queue list Op Fl state Ar states Op Fl limit Ar n
+List jobs in the queue, optionally filtering by comma-separated states.
+.It Ic mirror queue submit Op Ar flags Ar source Op Ar destdir
+(or
+.Ic mirror submit
+) Enqueue a mirror job in the background daemon.
+.It Ic mirror queue status Ar id
+Show detailed metadata, timings, and error status for a job.
+.It Ic mirror queue logs Op Fl f Ar id
+Display logs for a job, optionally streaming live updates with
+.Fl f .
+.It Ic mirror queue pause
+Pause queue processing.
+.It Ic mirror queue resume
+Resume queue processing.
+.It Ic mirror queue concurrency Ar n
+Set the maximum number of simultaneous workers.
+.It Ic mirror queue cancel Ar id
+Cancel an active or queued job.
+.It Ic mirror queue retry Ar id
+Retry a failed or quarantined job.
+.It Ic mirror queue quarantine Ar id Op Ar reason
+Manually isolate a job to quarantine.
+.It Ic mirror queue unquarantine Ar id
+Return a quarantined job to the queue.
+.It Ic mirror queue delete Ar id
+Delete a finished or quarantined job.
+.El
 .Sh CONFIGURATION
 The configuration file,
 .Pa ~/.config/mirrortools/config.toml ,
@@ -570,6 +615,7 @@ mirror imap -user me@example.com -password-file ~/.imap-pw \e
 .Ed
 .Sh SEE ALSO
 .Xr git 1 ,
+.Xr mirrord 1 ,
 .Xr rsync 1 ,
 .Xr ssh 1 ,
 .Xr wget 1

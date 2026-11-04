@@ -22,6 +22,8 @@ for arch in ${ARCHES:-amd64 arm64}; do
   mkdir -p dist/bin
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
     go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o dist/bin/mirror ./cmd/mirror
+  CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+    go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o dist/bin/mirrord ./cmd/mirrord
   VERSION="$VERSION" ARCH="$arch" nfpm pkg --config packaging/nfpm.yaml --packager deb \
     --target "dist/mirrortools_${VERSION}_${arch}.deb"
   rm -rf dist/bin

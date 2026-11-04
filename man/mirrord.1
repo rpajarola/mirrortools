@@ -1,0 +1,105 @@
+.Dd November 3, 2026
+.Dt MIRRORD 1
+.Os
+.Sh NAME
+.Nm mirrord
+.Nd mirrortools background daemon service
+.Sh SYNOPSIS
+.Nm
+.Op Fl config Ar path
+.Op Fl socket Ar path
+.Op Fl http Ar addr
+.Op Fl concurrency Ar n
+.Op Fl db Ar path
+.Nm
+.Fl version
+.Sh DESCRIPTION
+.Nm
+is the background daemon for
+.Xr mirror 1 .
+It manages a persistent queue of mirror requests, executes them with
+configurable worker concurrency, quarantines problematic or failing jobs,
+and provides both a local Unix domain socket for CLI management and an
+HTTP server for the Web dashboard and REST API.
+.Pp
+Mirror jobs and execution logs are stored in a SQLite database, ensuring
+jobs survive service restarts.
+Requests submitted through
+.Ic mirror queue submit
+are dispatched to worker slots and logged in real time.
+.Pp
+The flags are:
+.Bl -tag -width Ds
+.It Fl config Ar path
+Configuration file to read.
+The default is
+.Pa ~/.config/mirrortools/config.toml
+or
+.Ev $MIRROR_CONFIG .
+.It Fl socket Ar path
+Path to the Unix domain socket for local control.
+The default is
+.Pa $XDG_RUNTIME_DIR/mirrortools/mirrord.sock
+or
+.Pa ~/.local/state/mirrortools/mirrord.sock .
+.It Fl http Ar addr
+TCP address and port for the Web UI and HTTP API, such as
+.Li 127.0.0.1:8080 .
+When omitted or empty, only the local Unix domain socket is used.
+.It Fl concurrency Ar n
+Maximum number of worker goroutines running mirror jobs simultaneously.
+The default is 2.
+.It Fl db Ar path
+Path to the SQLite database file.
+The default is
+.Pa ~/.local/state/mirrortools/mirrord.db .
+.It Fl version
+Print the version and exit.
+.El
+.Sh QUEUE MANAGEMENT
+Jobs in the queue move through several states:
+.Bl -tag -width quarantined -compact -offset indent
+.It Sy queued
+Waiting for an available worker slot.
+.It Sy running
+Currently being downloaded by a worker.
+.It Sy paused
+Held from execution until resumed.
+.It Sy completed
+Successfully finished.
+.It Sy failed
+Finished with an error, eligible for retry.
+.It Sy quarantined
+Isolated after repeated failures or authentication/ban errors.
+.It Sy cancelled
+Explicitly terminated by the user.
+.El
+.Pp
+A job that encounters repeated errors (by default 3) or non-transient
+authentication/permission errors (such as HTTP 403 Forbidden or expired
+credentials) is automatically quarantined so it does not waste worker
+slots or risk remote IP bans.
+Quarantined jobs can be reviewed and retried using
+.Ic mirror queue unquarantine .
+.Sh WEB UI
+When started with
+.Fl http Ar addr ,
+.Nm
+serves an embedded, self-contained single-page dashboard.
+The Web UI provides real-time job monitoring, queue pause/resume controls,
+live log streaming via Server-Sent Events (SSE), manual submission, and
+in-browser configuration editing.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/.config/mirrortools/config.toml
+The configuration file.
+Daemon settings go in the
+.Li [daemon]
+section.
+.It Pa ~/.local/state/mirrortools/mirrord.db
+The SQLite database storing jobs, history, and log messages.
+.It Pa $XDG_RUNTIME_DIR/mirrortools/mirrord.sock
+The local control socket.
+.El
+.Sh SEE ALSO
+.Xr mirror 1

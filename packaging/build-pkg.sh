@@ -20,8 +20,11 @@ mkdir -p "$root/usr/local/bin" "$share" "$root/usr/local/share/man/man1"
 for arch in arm64 amd64; do
   CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
     go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o "$work/mirror-$arch" ./cmd/mirror
+  CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
+    go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o "$work/mirrord-$arch" ./cmd/mirrord
 done
 lipo -create -output "$root/usr/local/bin/mirror" "$work/mirror-arm64" "$work/mirror-amd64"
+lipo -create -output "$root/usr/local/bin/mirrord" "$work/mirrord-arm64" "$work/mirrord-amd64"
 
 cp README.md LICENSE "$share/"
 for f in */README.md; do
@@ -33,6 +36,7 @@ for f in */README.md; do
   cp "$f" "$share/$name.md"
 done
 install -m 0644 man/mirror.1 "$root/usr/local/share/man/man1/"
+install -m 0644 man/mirrord.1 "$root/usr/local/share/man/man1/"
 install -m 0755 packaging/macos/uninstall.sh "$share/uninstall.sh"
 
 pkgbuild --root "$root" \

@@ -21,9 +21,18 @@ contents:
     dst: /usr/bin/mirror
     file_info:
       mode: 0755
+  - src: dist/bin/mirrord
+    dst: /usr/bin/mirrord
+    file_info:
+      mode: 0755
 
   - src: man/mirror.1
     dst: /usr/share/man/man1/mirror.1
+  - src: man/mirrord.1
+    dst: /usr/share/man/man1/mirrord.1
+
+  - src: packaging/systemd/mirrord.service
+    dst: /usr/lib/systemd/user/mirrord.service
 
   - src: README.md
     dst: /usr/share/doc/mirrortools/README.md
