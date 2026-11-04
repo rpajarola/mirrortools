@@ -43,5 +43,7 @@ contents:
     dst: /usr/share/doc/mirrortools/http.md
   - src: icloud/README.md
     dst: /usr/share/doc/mirrortools/icloud.md
+  - src: sourceforge/README.md
+    dst: /usr/share/doc/mirrortools/sourceforge.md
   - src: LICENSE
     dst: /usr/share/doc/mirrortools/copyright

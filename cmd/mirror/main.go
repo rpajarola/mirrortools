@@ -44,6 +44,7 @@ import (
 	_ "github.com/rpajarola/mirrortools/icloud"
 	_ "github.com/rpajarola/mirrortools/imap"
 	_ "github.com/rpajarola/mirrortools/rsync"
+	_ "github.com/rpajarola/mirrortools/sourceforge"
 )
 
 // probeGitHTTP checks whether an http(s):// URL that didn't match git by

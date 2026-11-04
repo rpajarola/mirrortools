@@ -38,6 +38,8 @@ Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@lat
   [`git/README.md`](git/README.md).
 - `gopher/` — the Gopher protocol backend (registers itself as `gopher`).
   See [`gopher/README.md`](gopher/README.md).
+- `sourceforge/` — the SourceForge backend (registers itself as
+  `sourceforge`). See [`sourceforge/README.md`](sourceforge/README.md).
 - `httpmirror/` — the generic HTTP(S) backend (registers itself as `http`).
   See [`httpmirror/README.md`](httpmirror/README.md).
 - `groupsio/` — the groups.io backend (registers itself as `groupsio`). See
@@ -64,7 +66,8 @@ mirror [<method>] [flags] <source> [<destdir>]
 
 The method can be left out when the source says what it is:
 `https://archive.org/details/...` goes to `archiveorg`,
-`https://groups.io/g/...` to `groupsio`, `ftp://` and `ftps://` to `ftp`,
+`https://groups.io/g/...` to `groupsio`,
+`https://sourceforge.net/projects/...` to `sourceforge`, `ftp://` and `ftps://` to `ftp`,
 `gopher://` to `gopher`, `rsync://` and `host::module` to `rsync`, Git
 repository URLs (`git://`, `ssh://`, `git@host:path`, `*.git`, and
 repositories served over `http://` or `https://`) to `git`, and any other
@@ -101,6 +104,13 @@ Or to mirror a directory tree of an FTP server:
 
 ```
 mirror ftp://ftp.gnu.org/gnu/hello/ ./mirror
+```
+
+Or to mirror every file in a SourceForge project's files area (this lands
+in `./mirror/fsd-amoeba`):
+
+```
+mirror https://sourceforge.net/projects/fsd-amoeba/ ./mirror
 ```
 
 Or to mirror a groups.io group's Files section:

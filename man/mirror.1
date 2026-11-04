@@ -1,4 +1,4 @@
-.Dd October 24, 2026
+.Dd November 3, 2026
 .Dt MIRROR 1
 .Os
 .Sh NAME
@@ -40,7 +40,7 @@ The
 can be left out when
 .Ar source
 says what it is:
-.Bl -tag -width archiveorg -compact -offset indent
+.Bl -tag -width sourceforge -compact -offset indent
 .It Sx archiveorg
 .Li https://archive.org/details/ Ns ... and
 .Li /download/ Ns ...
@@ -68,6 +68,9 @@ or
 .Li https://
 .It Sx gopher
 .Li gopher://
+URLs
+.It Sx sourceforge
+.Li https://sourceforge.net/projects/ Ns ...
 URLs
 .It Sx rsync
 .Li rsync://
@@ -387,6 +390,35 @@ copies the directory's contents rather than the directory.
 .It Fl delete
 Delete local files that no longer exist on the remote side.
 .El
+.Ss sourceforge
+Downloads every file in the files area of a SourceForge project, and none
+of the site's other pages.
+.Ar source
+is a project URL,
+.Li https://sourceforge.net/projects/ Ns Ar name Ns / ,
+for the whole files area; the URL of a folder in it,
+.Li https://sourceforge.net/projects/ Ns Ar name Ns Li /files/ Ns Ar folder Ns / ,
+for that folder and everything under it; or the URL of a file in it, for
+that file.
+The files land in
+.Ar destdir Ns / Ns Ar name ,
+in the folders they are in on SourceForge, with their md5 checksums
+verified and their modification times set to when they were uploaded.
+A later run downloads only files that are new or no longer match their
+checksum.
+.Bl -tag -width Ds
+.It Fl wait Ar duration
+Wait
+.Ar duration ,
+such as 1s or 500ms, between requests.
+The default is not to wait.
+.It Fl retries Ar n
+Try a request again up to
+.Ar n
+times, 5 by default, when it fails with status 429 or 5xx, a network
+error or a bad checksum, as for
+.Sx archiveorg .
+.El
 .Sh CONFIGURATION
 The configuration file,
 .Pa ~/.config/mirrortools/config.toml ,
@@ -514,6 +546,12 @@ Mirror an archive.org item into the default
 from the configuration file:
 .Bd -literal -offset indent
 mirror https://archive.org/details/some-item
+.Ed
+.Pp
+Mirror every file of a SourceForge project into
+.Pa ~/mirror/fsd-amoeba :
+.Bd -literal -offset indent
+mirror https://sourceforge.net/projects/fsd-amoeba/ ~/mirror
 .Ed
 .Pp
 Mirror a web page with the
