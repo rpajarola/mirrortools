@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +26,7 @@ type Server struct {
 	cfg        *config.Config
 	configPath string
 	webFS      fs.FS
+	auth       *AuthManager
 	mux        *http.ServeMux
 
 	mu       sync.RWMutex
@@ -31,11 +35,13 @@ type Server struct {
 
 // NewServer creates a new API and Web server.
 func NewServer(queue *Queue, cfg *config.Config, configPath string, webFS fs.FS) *Server {
+	auth, _ := NewAuthManager(cfg.Daemon.Auth)
 	s := &Server{
 		queue:      queue,
 		cfg:        cfg,
 		configPath: configPath,
 		webFS:      webFS,
+		auth:       auth,
 		mux:        http.NewServeMux(),
 		eventSub:   make(map[chan string]struct{}),
 	}
@@ -73,6 +79,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/events", s.handleStreamEvents)
 	s.mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)
 	s.mux.HandleFunc("PUT /api/v1/config", s.handleSaveConfig)
+
+	// Authentication endpoints
+	s.mux.HandleFunc("GET /auth/login", s.handleLoginPage)
+	s.mux.HandleFunc("POST /auth/login", s.handleLoginSubmit)
+	s.mux.HandleFunc("GET /auth/oauth/start", s.handleOAuthStart)
+	s.mux.HandleFunc("GET /auth/callback", s.handleOAuthCallback)
+	s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	s.mux.HandleFunc("GET /api/v1/auth/me", s.handleAuthMe)
 
 	// Web UI
 	if s.webFS != nil {
@@ -559,8 +573,334 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.cfg = newCfg
+	// Reload auth manager
+	if newAuth, err := NewAuthManager(newCfg.Daemon.Auth); err == nil {
+		s.auth = newAuth
+	}
 	s.mu.Unlock()
 
 	s.broadcastEvent("config:updated")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// Auth returns the AuthManager.
+func (s *Server) Auth() *AuthManager {
+	return s.auth
+}
+
+// AuthEnabled reports whether authentication is enabled.
+func (s *Server) AuthEnabled() bool {
+	return s.auth != nil && s.auth.Enabled()
+}
+
+// PasswordAuthEnabled reports whether password authentication is enabled.
+func (s *Server) PasswordAuthEnabled() bool {
+	return s.auth != nil && s.auth.PasswordEnabled()
+}
+
+// OAuthEnabled reports whether OAuth authentication is enabled.
+func (s *Server) OAuthEnabled() bool {
+	return s.auth != nil && s.auth.OAuthEnabled()
+}
+
+// WithAuth wraps the server handler with authentication enforcement for TCP listeners.
+func (s *Server) WithAuth() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.AuthEnabled() {
+			s.ServeHTTP(w, r)
+			return
+		}
+
+		path := r.URL.Path
+		// Public auth endpoints
+		if path == "/auth/login" || path == "/auth/callback" || path == "/auth/oauth/start" {
+			s.ServeHTTP(w, r)
+			return
+		}
+
+		user, ok := s.auth.ValidateRequest(r)
+		if !ok {
+			if strings.HasPrefix(path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json") {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="mirrord"`)
+				writeError(w, http.StatusUnauthorized, "authentication required")
+				return
+			}
+			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), userContextKey{}, user)
+		s.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if s.auth != nil {
+		if _, ok := s.auth.ValidateRequest(r); ok {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+	}
+
+	errMsg := r.URL.Query().Get("error")
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>mirrord — Log in</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --danger: #ef4444;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .login-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      width: 100%%;
+      max-width: 400px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    .brand {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .brand h1 { font-size: 24px; font-weight: 700; }
+    .brand p { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+    .alert {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    input {
+      width: 100%%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      margin-bottom: 16px;
+      outline: none;
+    }
+    input:focus { border-color: var(--primary); }
+    .btn {
+      width: 100%%;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      display: block;
+      text-decoration: none;
+      border: none;
+    }
+    .btn-primary { background: var(--primary); color: #000; }
+    .btn-primary:hover { background: var(--primary-hover); color: #fff; }
+    .btn-oauth {
+      background: #24292f;
+      color: #fff;
+      border: 1px solid var(--border);
+      margin-top: 10px;
+    }
+    .btn-oauth:hover { background: #32383f; }
+    .divider {
+      text-align: center;
+      margin: 18px 0;
+      color: var(--text-muted);
+      font-size: 12px;
+      position: relative;
+    }
+    .divider::before, .divider::after {
+      content: "";
+      position: absolute;
+      top: 50%%;
+      width: 42%%;
+      height: 1px;
+      background: var(--border);
+    }
+    .divider::before { left: 0; }
+    .divider::after { right: 0; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="brand">
+      <h1>mirrord</h1>
+      <p>Authentication Required</p>
+    </div>
+`)
+
+	if errMsg != "" {
+		fmt.Fprintf(w, `    <div class="alert">%s</div>\n`, html.EscapeString(errMsg))
+	}
+
+	hasPassword := s.PasswordAuthEnabled()
+	hasOAuth := s.OAuthEnabled()
+
+	if hasPassword {
+		fmt.Fprintf(w, `    <form method="POST" action="/auth/login">
+      <input type="password" name="password" placeholder="Enter password" required autofocus />
+      <button type="submit" class="btn btn-primary">Log in with Password</button>
+    </form>
+`)
+	}
+
+	if hasPassword && hasOAuth {
+		fmt.Fprint(w, `    <div class="divider">or</div>\n`)
+	}
+
+	if hasOAuth {
+		providerName := "Single Sign-On"
+		if s.auth != nil {
+			providerName = s.auth.ProviderName()
+		}
+		fmt.Fprintf(w, `    <a href="/auth/oauth/start" class="btn btn-oauth">Log in with %s</a>\n`, html.EscapeString(providerName))
+	}
+
+	if !hasPassword && !hasOAuth {
+		fmt.Fprint(w, `    <p style="text-align:center;color:var(--text-muted);font-size:13px;">No login methods are currently configured.</p>\n`)
+	}
+
+	fmt.Fprint(w, `  </div>
+</body>
+</html>`)
+}
+
+func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil || !s.auth.PasswordEnabled() {
+		writeError(w, http.StatusBadRequest, "password authentication is not enabled")
+		return
+	}
+
+	var password string
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var payload struct {
+			Password string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		password = payload.Password
+	} else {
+		_ = r.ParseForm()
+		password = r.FormValue("password")
+	}
+
+	if !s.auth.CheckPassword(password) {
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			writeError(w, http.StatusUnauthorized, "invalid password")
+		} else {
+			http.Redirect(w, r, "/auth/login?error=Invalid+password", http.StatusSeeOther)
+		}
+		return
+	}
+
+	cookie := s.auth.CreateSession("admin")
+	http.SetCookie(w, cookie)
+
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "user": "admin"})
+	} else {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
+func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil || !s.auth.OAuthEnabled() {
+		http.Error(w, "OAuth is not configured", http.StatusBadRequest)
+		return
+	}
+
+	url, err := s.auth.OAuthStartURL(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil || !s.auth.OAuthEnabled() {
+		http.Error(w, "OAuth is not configured", http.StatusBadRequest)
+		return
+	}
+
+	user, err := s.auth.HandleOAuthCallback(r.Context(), r)
+	if err != nil {
+		http.Redirect(w, r, "/auth/login?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+
+	cookie := s.auth.CreateSession(user)
+	http.SetCookie(w, cookie)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if s.auth != nil {
+		if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+			s.auth.InvalidateSession(c.Value)
+		}
+		http.SetCookie(w, s.auth.LogoutCookie())
+	}
+
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+	} else {
+		http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+	}
+}
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	user := ""
+	authenticated := false
+	if s.auth != nil {
+		if u, ok := s.auth.ValidateRequest(r); ok {
+			user = u
+			authenticated = true
+		}
+	} else {
+		user = "anonymous"
+		authenticated = true
+	}
+
+	providerName := ""
+	if s.auth != nil {
+		providerName = s.auth.ProviderName()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":          s.AuthEnabled(),
+		"authenticated":    authenticated,
+		"user":             user,
+		"password_enabled": s.PasswordAuthEnabled(),
+		"oauth_enabled":    s.OAuthEnabled(),
+		"provider_name":    providerName,
+	})
 }

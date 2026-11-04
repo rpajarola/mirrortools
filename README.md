@@ -135,12 +135,15 @@ quarantine, and serving a local Unix domain socket and Web UI.
 Start the daemon:
 
 ```bash
-mirrord -http 127.0.0.1:8080
+mirrord -http 127.0.0.1:8080 -password "your-admin-password"
 # or via systemd: systemctl --user start mirrord
 ```
 
 Open `http://127.0.0.1:8080` in your browser for the real-time Web dashboard,
 queue controls, live log streaming, and in-browser config editing.
+When password or OAuth authentication is configured, Web UI sessions use HTTP-only
+cookies and remote REST API clients can pass `Authorization: Bearer <password>`.
+Local CLI commands via Unix socket (`mirror queue`) bypass HTTP authentication automatically.
 
 ### Queue CLI
 
@@ -179,6 +182,17 @@ destdir = "~/mirror"
 [daemon]
 http = "127.0.0.1:8080"
 concurrency = 3
+
+# Optional Web UI & HTTP API authentication
+[daemon.auth]
+password-file = "~/.config/mirrortools/daemon-password"
+
+# Optional OAuth 2.0 / OpenID Connect SSO
+[daemon.auth.oauth]
+provider = "google"   # or "github", "generic"
+client-id = "your-client-id.apps.googleusercontent.com"
+client-secret-file = "~/.config/mirrortools/oauth-secret"
+allowed-users = ["you@example.com"]
 
 # A section per method: default values for its flags (without the "-"),
 # and optionally a destdir of its own.

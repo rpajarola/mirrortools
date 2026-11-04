@@ -108,3 +108,110 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("concurrency: expected 200, got %d", rec.Code)
 	}
 }
+
+func TestServerWithAuth(t *testing.T) {
+	store := newTestStore(t)
+	hub := NewLogHub(10)
+	executor := &InProcessExecutor{}
+	q := NewQueue(store, executor, hub, QueueConfig{Concurrency: 1})
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			Auth: config.AuthConfig{
+				Password: "secretpass",
+			},
+		},
+	}
+	srv := NewServer(q, cfg, "", nil)
+	handler := srv.WithAuth()
+
+	// 1. Unauthenticated request to / redirects to /auth/login
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/auth/login" {
+		t.Fatalf("expected redirect to /auth/login, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// 2. Unauthenticated request to /api/ returns 401 Unauthorized
+	req = httptest.NewRequest("GET", "/api/v1/queue/status", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated API, got %d", rec.Code)
+	}
+
+	// 3. Login page is public
+	req = httptest.NewRequest("GET", "/auth/login", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login page should be 200, got %d", rec.Code)
+	}
+
+	// 4. Bad password fails
+	form := "password=wrong"
+	req = httptest.NewRequest("POST", "/auth/login", bytes.NewBufferString(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !bytes.Contains([]byte(rec.Header().Get("Location")), []byte("error=")) {
+		t.Fatalf("expected redirect with error for bad password, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// 5. Correct password succeeds and sets session cookie
+	form = "password=secretpass"
+	req = httptest.NewRequest("POST", "/auth/login", bytes.NewBufferString(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("expected redirect to / on successful login, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+	cookies := rec.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil || sessionCookie.Value == "" {
+		t.Fatalf("expected session cookie to be set")
+	}
+
+	// 6. Request with session cookie succeeds
+	req = httptest.NewRequest("GET", "/api/v1/queue/status", nil)
+	req.AddCookie(sessionCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with session cookie, got %d", rec.Code)
+	}
+
+	// 7. Request with Bearer token matching password succeeds
+	req = httptest.NewRequest("GET", "/api/v1/queue/status", nil)
+	req.Header.Set("Authorization", "Bearer secretpass")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with Bearer token, got %d", rec.Code)
+	}
+
+	// 8. Logout invalidates session
+	req = httptest.NewRequest("POST", "/auth/logout", nil)
+	req.AddCookie(sessionCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected redirect on logout, got %d", rec.Code)
+	}
+
+	// 9. Old session cookie is now rejected
+	req = httptest.NewRequest("GET", "/api/v1/queue/status", nil)
+	req.AddCookie(sessionCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after logout, got %d", rec.Code)
+	}
+}

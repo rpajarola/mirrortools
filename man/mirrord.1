@@ -9,6 +9,8 @@
 .Op Fl config Ar path
 .Op Fl socket Ar path
 .Op Fl http Ar addr
+.Op Fl password Ar pass
+.Op Fl password-file Ar path
 .Op Fl concurrency Ar n
 .Op Fl db Ar path
 .Nm
@@ -46,6 +48,10 @@ or
 TCP address and port for the Web UI and HTTP API, such as
 .Li 127.0.0.1:8080 .
 When omitted or empty, only the local Unix domain socket is used.
+.It Fl password Ar pass
+Password protecting the Web UI and HTTP API.
+.It Fl password-file Ar path
+Path to a file containing the password protecting the Web UI and HTTP API.
 .It Fl concurrency Ar n
 Maximum number of worker goroutines running mirror jobs simultaneously.
 The default is 2.
@@ -89,6 +95,44 @@ serves an embedded, self-contained single-page dashboard.
 The Web UI provides real-time job monitoring, queue pause/resume controls,
 live log streaming via Server-Sent Events (SSE), manual submission, and
 in-browser configuration editing.
+.Sh AUTHENTICATION
+When an HTTP listener is configured, authentication can be enabled to protect
+the Web dashboard and REST API.
+Local CLI operations over the Unix domain socket remain unauthenticated,
+protected by local filesystem permissions.
+.Pp
+Two authentication mechanisms are supported:
+.Bl -tag -width Ds
+.It Sy Password authentication
+Configured with
+.Fl password ,
+.Fl password-file ,
+or in
+.Li [daemon.auth]
+with
+.Li password
+or
+.Li password-file .
+In the browser, logging in sets a secure, HTTP-only session cookie.
+For API requests, the password may be sent via
+.Li Authorization: Bearer <password>
+or HTTP Basic authentication.
+.It Sy OAuth 2.0 / OpenID Connect
+Configured under
+.Li [daemon.auth.oauth]
+with provider settings
+.Li provider ,
+.Li issuer
+or endpoints
+.Pq Li auth-url , token-url , userinfo-url ,
+.Li client-id ,
+and
+.Li client-secret
+or
+.Li client-secret-file .
+Optional user authorization can be restricted using
+.Li allowed-users .
+.El
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa ~/.config/mirrortools/config.toml

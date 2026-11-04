@@ -43,6 +43,69 @@ type DaemonConfig struct {
 	Concurrency int
 	DB          string
 	MaxRetries  int
+	Auth        AuthConfig
+}
+
+// AuthConfig holds authentication settings for the web dashboard and HTTP API.
+type AuthConfig struct {
+	Password     string
+	PasswordFile string
+	OAuth        OAuthConfig
+}
+
+// PasswordValue returns the configured password or reads it from PasswordFile.
+func (a *AuthConfig) PasswordValue() (string, error) {
+	if a.Password != "" {
+		return a.Password, nil
+	}
+	if a.PasswordFile != "" {
+		b, err := os.ReadFile(a.PasswordFile)
+		if err != nil {
+			return "", fmt.Errorf("reading password file %s: %w", a.PasswordFile, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return "", nil
+}
+
+// Enabled reports whether any authentication method is configured.
+func (a *AuthConfig) Enabled() bool {
+	return a.Password != "" || a.PasswordFile != "" || a.OAuth.Enabled()
+}
+
+// OAuthConfig holds OAuth 2.0 / OpenID Connect settings.
+type OAuthConfig struct {
+	Provider         string // "google", "github", "generic"
+	Issuer           string // OpenID Connect discovery issuer URL
+	ClientID         string
+	ClientSecret     string
+	ClientSecretFile string
+	AuthURL          string
+	TokenURL         string
+	UserInfoURL      string
+	RedirectURL      string
+	Scopes           []string
+	AllowedUsers     []string
+}
+
+// Enabled reports whether OAuth authentication is configured.
+func (o *OAuthConfig) Enabled() bool {
+	return o.ClientID != "" && (o.ClientSecret != "" || o.ClientSecretFile != "")
+}
+
+// ClientSecretValue returns the configured client secret or reads it from ClientSecretFile.
+func (o *OAuthConfig) ClientSecretValue() (string, error) {
+	if o.ClientSecret != "" {
+		return o.ClientSecret, nil
+	}
+	if o.ClientSecretFile != "" {
+		b, err := os.ReadFile(o.ClientSecretFile)
+		if err != nil {
+			return "", fmt.Errorf("reading client secret file %s: %w", o.ClientSecretFile, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return "", nil
 }
 
 // MethodConfig holds default destination and flags for a specific mirroring method.
@@ -163,6 +226,16 @@ func Load(path string) (*Config, error) {
 
 func parseDaemonConfig(d *DaemonConfig, m map[string]any, path string) error {
 	for _, k := range sortedKeys(m) {
+		if k == "auth" {
+			subMap, ok := m[k].(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: [daemon.auth]: expected a table", path)
+			}
+			if err := parseAuthConfig(&d.Auth, subMap, path); err != nil {
+				return err
+			}
+			continue
+		}
 		val, err := scalar(m[k])
 		if err != nil {
 			return fmt.Errorf("%s: [daemon] %s: %v", path, k, err)
@@ -189,6 +262,96 @@ func parseDaemonConfig(d *DaemonConfig, m map[string]any, path string) error {
 		default:
 			return fmt.Errorf("%s: [daemon]: unknown setting %q", path, k)
 		}
+	}
+	return nil
+}
+
+func parseAuthConfig(a *AuthConfig, m map[string]any, path string) error {
+	for _, k := range sortedKeys(m) {
+		if k == "oauth" {
+			subMap, ok := m[k].(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: [daemon.auth.oauth]: expected a table", path)
+			}
+			if err := parseOAuthConfig(&a.OAuth, subMap, path); err != nil {
+				return err
+			}
+			continue
+		}
+		val, err := scalar(m[k])
+		if err != nil {
+			return fmt.Errorf("%s: [daemon.auth] %s: %v", path, k, err)
+		}
+		switch k {
+		case "password":
+			a.Password = val
+		case "password-file", "password_file":
+			a.PasswordFile = ExpandHome(val)
+		default:
+			return fmt.Errorf("%s: [daemon.auth]: unknown setting %q", path, k)
+		}
+	}
+	return nil
+}
+
+func parseOAuthConfig(o *OAuthConfig, m map[string]any, path string) error {
+	for _, k := range sortedKeys(m) {
+		switch k {
+		case "scopes":
+			o.Scopes = stringList(m[k])
+		case "allowed-users", "allowed_users":
+			o.AllowedUsers = stringList(m[k])
+		default:
+			val, err := scalar(m[k])
+			if err != nil {
+				return fmt.Errorf("%s: [daemon.auth.oauth] %s: %v", path, k, err)
+			}
+			switch k {
+			case "provider":
+				o.Provider = val
+			case "issuer":
+				o.Issuer = val
+			case "client-id", "client_id":
+				o.ClientID = val
+			case "client-secret", "client_secret":
+				o.ClientSecret = val
+			case "client-secret-file", "client_secret_file":
+				o.ClientSecretFile = ExpandHome(val)
+			case "auth-url", "auth_url":
+				o.AuthURL = val
+			case "token-url", "token_url":
+				o.TokenURL = val
+			case "userinfo-url", "userinfo_url":
+				o.UserInfoURL = val
+			case "redirect-url", "redirect_url":
+				o.RedirectURL = val
+			default:
+				return fmt.Errorf("%s: [daemon.auth.oauth]: unknown setting %q", path, k)
+			}
+		}
+	}
+	return nil
+}
+
+func stringList(v any) []string {
+	switch val := v.(type) {
+	case []any:
+		var res []string
+		for _, item := range val {
+			res = append(res, fmt.Sprint(item))
+		}
+		return res
+	case []string:
+		return val
+	case string:
+		var res []string
+		for _, s := range strings.Split(val, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				res = append(res, s)
+			}
+		}
+		return res
 	}
 	return nil
 }

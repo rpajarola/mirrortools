@@ -59,6 +59,8 @@ func main() {
 	httpFlag := flag.String("http", "", "HTTP address to listen on for Web UI (e.g. 127.0.0.1:8080)")
 	dbFlag := flag.String("db", "", "path to SQLite database")
 	concFlag := flag.Int("concurrency", 0, "maximum concurrent mirror workers")
+	passFlag := flag.String("password", "", "web interface password")
+	passFileFlag := flag.String("password-file", "", "path to file containing web interface password")
 	verFlag := flag.Bool("version", false, "print mirrord version and exit")
 	flag.Parse()
 
@@ -93,6 +95,12 @@ func main() {
 	concurrency := cfg.Daemon.Concurrency
 	if *concFlag > 0 {
 		concurrency = *concFlag
+	}
+	if *passFlag != "" {
+		cfg.Daemon.Auth.Password = *passFlag
+	}
+	if *passFileFlag != "" {
+		cfg.Daemon.Auth.PasswordFile = config.ExpandHome(*passFileFlag)
 	}
 
 	log.Printf("mirrord: starting mirrortools daemon %s", version.String())
@@ -172,10 +180,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("mirrord: listening on http %s: %v", httpAddr, err)
 		}
+		if server.AuthEnabled() {
+			log.Printf("mirrord: authentication enabled (password: %v, oauth: %v)", server.PasswordAuthEnabled(), server.OAuthEnabled())
+		}
 		log.Printf("mirrord: Web UI and HTTP API listening on http://%s", httpAddr)
 
 		tcpServer := &http.Server{
-			Handler:      server,
+			Handler:      server.WithAuth(),
 			ReadTimeout:  15 * time.Minute,
 			WriteTimeout: 0,
 		}

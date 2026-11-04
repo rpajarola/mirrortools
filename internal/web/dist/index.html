@@ -264,6 +264,10 @@
       </div>
       <button id="pauseQueueBtn" class="btn btn-warning" onclick="toggleQueuePause()">Pause Queue</button>
       <button class="btn" onclick="openConfigModal()">Config</button>
+      <div id="authHeader" style="display:none; align-items:center; gap:8px;">
+        <span id="authUsername" style="font-size:12px; color:var(--primary); font-weight:600;"></span>
+        <button class="btn btn-danger" onclick="logout()" style="padding:5px 10px; font-size:11px;">Log out</button>
+      </div>
     </div>
   </header>
 
@@ -350,6 +354,10 @@
 
     async function fetchJSON(url, opts = {}) {
       const res = await fetch(url, opts);
+      if (res.status === 401) {
+        window.location.href = '/auth/login';
+        throw new Error('Authentication required');
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
         throw new Error(err.error || res.statusText);
@@ -679,7 +687,32 @@
       };
     }
 
+    async function checkAuth() {
+      try {
+        const me = await fetchJSON('/api/v1/auth/me');
+        if (me && me.enabled) {
+          if (!me.authenticated) {
+            window.location.href = '/auth/login';
+            return;
+          }
+          const authEl = document.getElementById('authHeader');
+          if (authEl) {
+            authEl.style.display = 'flex';
+            document.getElementById('authUsername').innerText = me.user || 'authenticated';
+          }
+        }
+      } catch (err) {}
+    }
+
+    async function logout() {
+      try {
+        await fetchJSON('/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      window.location.href = '/auth/login';
+    }
+
     // Init
+    checkAuth();
     loadStatus();
     loadJobs();
     connectGlobalEvents();
