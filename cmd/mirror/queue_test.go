@@ -15,9 +15,19 @@ import (
 	"github.com/rpajarola/mirrortools/internal/daemon"
 )
 
+func shortSocketPath(t *testing.T) string {
+	d, err := os.MkdirTemp("/tmp", "md")
+	if err != nil {
+		d = t.TempDir()
+	} else {
+		t.Cleanup(func() { os.RemoveAll(d) })
+	}
+	return filepath.Join(d, "s")
+}
+
 func TestCLIQueueIntegration(t *testing.T) {
 	tempDir := t.TempDir()
-	sockPath := filepath.Join(tempDir, "test-mirrord.sock")
+	sockPath := shortSocketPath(t)
 	dbPath := filepath.Join(tempDir, "test-mirrord.db")
 
 	store, err := daemon.OpenStore(dbPath)
@@ -147,7 +157,7 @@ func TestTruncate(t *testing.T) {
 
 func TestSubmitMainWithResolve(t *testing.T) {
 	tempDir := t.TempDir()
-	sockPath := filepath.Join(tempDir, "mock.sock")
+	sockPath := shortSocketPath(t)
 
 	cfg := &config{
 		DestDir: filepath.Join(tempDir, "dest"),
