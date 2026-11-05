@@ -210,3 +210,39 @@ func TestMirrorqQuietAndCustomDest(t *testing.T) {
 		t.Fatalf("expected DestDir=%q, got %+v", customDest, jobs)
 	}
 }
+
+func TestMirrorqWithFullConfigFile(t *testing.T) {
+	sockPath, _ := startTestDaemon(t)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	cfgContent := `
+destdir = "/tmp/mirror"
+
+[daemon]
+socket = "` + sockPath + `"
+
+[archiveorg]
+wait = "1s"
+
+[git]
+destdir = "/tmp/git"
+
+[http]
+wait = "2s"
+
+[sourceforge]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"-config", cfgPath, "https://sourceforge.net/projects/cfg-test/"}
+	code := run(args, nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("run failed with code %d: stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Enqueued job") {
+		t.Fatalf("expected job to be enqueued, got: %s", stdout.String())
+	}
+}

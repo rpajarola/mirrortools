@@ -21,6 +21,19 @@ import (
 	iconfig "github.com/rpajarola/mirrortools/internal/config"
 	"github.com/rpajarola/mirrortools/internal/daemon"
 	"github.com/rpajarola/mirrortools/internal/version"
+
+	// Blank-import every mirroring backend so its init() registers it.
+	_ "github.com/rpajarola/mirrortools/archiveorg"
+	_ "github.com/rpajarola/mirrortools/ftpmirror"
+	_ "github.com/rpajarola/mirrortools/git"
+	_ "github.com/rpajarola/mirrortools/gopher"
+	_ "github.com/rpajarola/mirrortools/gphotos"
+	_ "github.com/rpajarola/mirrortools/groupsio"
+	_ "github.com/rpajarola/mirrortools/httpmirror"
+	_ "github.com/rpajarola/mirrortools/icloud"
+	_ "github.com/rpajarola/mirrortools/imap"
+	_ "github.com/rpajarola/mirrortools/rsync"
+	_ "github.com/rpajarola/mirrortools/sourceforge"
 )
 
 func isTerminal(f *os.File) bool {
