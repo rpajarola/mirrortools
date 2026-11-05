@@ -22,9 +22,12 @@ for arch in arm64 amd64; do
     go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o "$work/mirror-$arch" ./cmd/mirror
   CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
     go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o "$work/mirrord-$arch" ./cmd/mirrord
+  CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
+    go build -trimpath -ldflags="-s -w -X $VERSION_VAR=$VERSION" -o "$work/mirrorq-$arch" ./cmd/mirrorq
 done
 lipo -create -output "$root/usr/local/bin/mirror" "$work/mirror-arm64" "$work/mirror-amd64"
 lipo -create -output "$root/usr/local/bin/mirrord" "$work/mirrord-arm64" "$work/mirrord-amd64"
+lipo -create -output "$root/usr/local/bin/mirrorq" "$work/mirrorq-arm64" "$work/mirrorq-amd64"
 
 cp README.md LICENSE "$share/"
 for f in */README.md; do
@@ -37,6 +40,7 @@ for f in */README.md; do
 done
 install -m 0644 man/mirror.1 "$root/usr/local/share/man/man1/"
 install -m 0644 man/mirrord.1 "$root/usr/local/share/man/man1/"
+install -m 0644 man/mirrorq.1 "$root/usr/local/share/man/man1/"
 install -m 0755 packaging/macos/uninstall.sh "$share/uninstall.sh"
 
 pkgbuild --root "$root" \

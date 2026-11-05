@@ -13,9 +13,10 @@ and available from:
   release, which needs no Homebrew
 
 All of them install the `mirror` command, the `mirrord` daemon service,
-and their manual pages,
-[mirror(1)](https://rpajarola.github.io/apt/mirrortools/mirror.1.html) and
-[mirrord(1)](https://rpajarola.github.io/apt/mirrortools/mirrord.1.html).
+the `mirrorq` enqueue utility, and their manual pages,
+[mirror(1)](https://rpajarola.github.io/apt/mirrortools/mirror.1.html),
+[mirrord(1)](https://rpajarola.github.io/apt/mirrortools/mirrord.1.html), and
+[mirrorq(1)](https://rpajarola.github.io/apt/mirrortools/mirrorq.1.html).
 [packaging](packaging/README.md)
 describes what is installed and how the packages are built.
 
@@ -27,7 +28,8 @@ Or build it with Go: `go install github.com/rpajarola/mirrortools/cmd/mirror@lat
   backend implements, and the registry the CLI uses to find them.
 - `cmd/mirror/` — the `mirror` CLI, a thin driver over the registry and daemon queue client.
 - `cmd/mirrord/` — the `mirrord` daemon service (queue, workers, Web UI).
-- `man/` — the `mirror(1)` and `mirrord(1)` manual pages.
+- `cmd/mirrorq/` — the `mirrorq` utility for batch enqueuing URLs via arguments or stdin.
+- `man/` — the `mirror(1)`, `mirrord(1)` and `mirrorq(1)` manual pages.
 - `packaging/` — `.deb`, macOS `.pkg` and Homebrew packaging, built by
   the release workflow. See [`packaging/README.md`](packaging/README.md).
 - `gphotos/` — the Google Photos backend (registers itself as `gphotos`).
@@ -166,6 +168,24 @@ mirror queue resume              # resume processing
 mirror queue concurrency 4       # adjust worker limit
 mirror queue cancel 1            # cancel a job
 mirror queue retry 1             # retry a failed/quarantined job
+```
+
+### Batch Enqueuing (`mirrorq`)
+
+`mirrorq` enqueues URLs directly into the background queue, accepting URLs either as arguments or line-by-line from standard input:
+
+```bash
+# Pass URLs as command-line arguments
+mirrorq https://sourceforge.net/projects/fsd-amoeba/ https://archive.org/details/nasa-audio
+
+# Pipe a list of URLs (one per line, comments starting with # and blank lines ignored)
+cat urls.txt | mirrorq
+
+# Redirect directly
+mirrorq < urls.txt
+
+# Override destination directory or suppress confirmation messages
+mirrorq -d ~/downloads/archive -q < urls.txt
 ```
 
 ### Config file

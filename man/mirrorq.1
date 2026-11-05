@@ -1,0 +1,82 @@
+.Dd November 4, 2026
+.Dt MIRRORQ 1
+.Os
+.Sh NAME
+.Nm mirrorq
+.Nd enqueue URLs into the mirrord background daemon queue
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar config
+.Op Fl s Ar socket
+.Op Fl d Ar dest
+.Op Fl q
+.Op Ar url ...
+.Nm
+.Op Fl h | Fl v
+.Sh DESCRIPTION
+.Nm
+submits one or more URLs into the
+.Xr mirrord 1
+background queue for automatic downloading.
+.Pp
+URLs may be passed as positional arguments on the command line,
+read from standard input (one URL per line) when standard input is
+piped or redirected from a file, or both.
+Empty lines and lines beginning with
+.Ql #
+are ignored.
+.Pp
+For each URL,
+.Xr mirrord 1
+automatically detects the appropriate download method
+.Pq archiveorg , ftp , git , gopher , groupsio , http , rsync , or sourceforge
+and mirrors into the configured destination directory.
+.Pp
+The flags are:
+.Bl -tag -width Ds
+.It Fl c , Fl config Ar path
+Configuration file to read.
+The default is
+.Pa ~/.config/mirrortools/config.toml
+or
+.Ev $MIRROR_CONFIG .
+.It Fl s , Fl socket Ar path
+Path to the
+.Xr mirrord 1
+Unix domain socket.
+The default is
+.Pa $XDG_RUNTIME_DIR/mirrortools/mirrord.sock ,
+.Pa ~/.local/state/mirrortools/mirrord.sock ,
+or
+.Ev $MIRRORD_SOCKET .
+.It Fl d , Fl dest Ar dir
+Override the destination directory for the enqueued jobs.
+.It Fl q , Fl quiet
+Suppress progress and confirmation messages; only errors are printed.
+.It Fl v , Fl version
+Print the program version and exit.
+.It Fl h , Fl help
+Print usage information and exit.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Enqueue URLs passed as command-line arguments:
+.Pp
+.Dl $ mirrorq https://sourceforge.net/projects/fsd-amoeba/ https://archive.org/details/nasa-audio
+.Pp
+Pipe a file containing a list of URLs (one per line) into
+.Nm :
+.Pp
+.Dl $ cat urls.txt | mirrorq
+.Pp
+Redirect standard input directly:
+.Pp
+.Dl $ mirrorq < urls.txt
+.Pp
+Override destination directory and suppress confirmation output:
+.Pp
+.Dl $ mirrorq -q -d /mnt/backups/archive https://archive.org/details/nasa-audio
+.Sh SEE ALSO
+.Xr mirror 1 ,
+.Xr mirrord 1

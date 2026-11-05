@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rpajarola/mirrortools/git"
 	"github.com/rpajarola/mirrortools/internal/config"
 	"github.com/rpajarola/mirrortools/mirror"
 )
@@ -216,6 +217,9 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "" {
 		if m, ok := mirror.Detect(req.Source); ok {
 			req.Method = m.Name
+			if req.Method == "http" && git.ProbeHTTP(r.Context(), req.Source) {
+				req.Method = "git"
+			}
 		} else {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot auto-detect mirror method for source %q; specify method", req.Source))
 			return
@@ -226,12 +230,19 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auto-fill destination if omitted
-	if req.DestDir == "" {
-		s.mu.RLock()
-		defaultDest := s.cfg.DestDir
-		mc := s.cfg.Methods[req.Method]
-		s.mu.RUnlock()
+	s.mu.RLock()
+	defaultDest := s.cfg.DestDir
+	mc := s.cfg.Methods[req.Method]
+	var methodFlags map[string]string
+	if mc != nil && len(mc.Flags) > 0 {
+		methodFlags = make(map[string]string, len(mc.Flags))
+		for k, v := range mc.Flags {
+			methodFlags[k] = v
+		}
+	}
+	s.mu.RUnlock()
 
+	if req.DestDir == "" {
 		if mc != nil && mc.DestDir != "" {
 			req.DestDir = mc.DestDir
 		} else if defaultDest != "" {
@@ -246,6 +257,18 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeError(w, http.StatusBadRequest, "no destination directory given and no default destdir configured")
 			return
+		}
+	}
+
+	// Merge default flags from method config if not explicitly set
+	if len(methodFlags) > 0 {
+		if req.Flags == nil {
+			req.Flags = make(map[string]string, len(methodFlags))
+		}
+		for k, v := range methodFlags {
+			if _, ok := req.Flags[k]; !ok {
+				req.Flags[k] = v
+			}
 		}
 	}
 
