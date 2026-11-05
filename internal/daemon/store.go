@@ -63,7 +63,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_prio ON jobs(state, priority DESC, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_jobs_site_state ON jobs(site, state);
 
 CREATE TABLE IF NOT EXISTS job_logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,9 +101,22 @@ func OpenStore(dbPath string) (*Store, error) {
 	}
 
 	// Apply migrations for site and path columns if missing in existing databases
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN site TEXT NOT NULL DEFAULT '';`)
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN path TEXT NOT NULL DEFAULT '';`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_site_state ON jobs(site, state);`)
+	if hasSite, _ := columnExists(db, "jobs", "site"); !hasSite {
+		if _, err := db.Exec(`ALTER TABLE jobs ADD COLUMN site TEXT NOT NULL DEFAULT '';`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrating db schema (site column): %w", err)
+		}
+	}
+	if hasPath, _ := columnExists(db, "jobs", "path"); !hasPath {
+		if _, err := db.Exec(`ALTER TABLE jobs ADD COLUMN path TEXT NOT NULL DEFAULT '';`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrating db schema (path column): %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_site_state ON jobs(site, state);`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating idx_jobs_site_state: %w", err)
+	}
 
 	// Backfill any empty site/path values from source
 	if rows, err := db.Query(`SELECT id, method, source FROM jobs WHERE site = '' OR path = '';`); err == nil {
@@ -131,6 +143,26 @@ func OpenStore(dbPath string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s);", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
+			if strings.EqualFold(name, column) {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close closes the underlying SQLite database.

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 )
 
@@ -319,5 +321,66 @@ func TestStorePrefixOperations(t *testing.T) {
 	jDownloads, _ = s.GetJob(ctx, 3)
 	if jDownloads.State != StateQuarantined {
 		t.Fatalf("expected downloads to still be quarantined, got %s", jDownloads.State)
+	}
+}
+
+func TestStoreMigrationFromOldSchema(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "legacy.db")
+
+	// 1. Manually create a database with the v0.2.3 schema (missing site and path)
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	legacySchema := `
+	CREATE TABLE jobs (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		method            TEXT NOT NULL,
+		source            TEXT NOT NULL,
+		dest_dir          TEXT NOT NULL,
+		flags_json        TEXT NOT NULL DEFAULT '{}',
+		state             TEXT NOT NULL,
+		priority          INTEGER NOT NULL DEFAULT 0,
+		created_at        DATETIME NOT NULL,
+		started_at        DATETIME,
+		finished_at       DATETIME,
+		retry_count       INTEGER NOT NULL DEFAULT 0,
+		max_retries       INTEGER NOT NULL DEFAULT 3,
+		last_error        TEXT,
+		quarantine_reason TEXT
+	);
+	CREATE INDEX idx_jobs_state_prio ON jobs(state, priority DESC, created_at ASC);
+	`
+	if _, err := rawDB.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	_, err = rawDB.Exec(`
+		INSERT INTO jobs (method, source, dest_dir, state, created_at)
+		VALUES ('http', 'https://example.com/docs/api', '/tmp/dest', 'queued', '2026-11-04 12:00:00');
+	`)
+	if err != nil {
+		t.Fatalf("insert legacy job: %v", err)
+	}
+	rawDB.Close()
+
+	// 2. Open via OpenStore, which must migrate without error
+	s, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore migration failed: %v", err)
+	}
+	defer s.Close()
+
+	// 3. Verify that the existing job was backfilled with site and path
+	ctx := context.Background()
+	j, err := s.GetJob(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetJob(1): %v", err)
+	}
+	if j.Site != "https://example.com" {
+		t.Fatalf("expected site 'https://example.com', got %q", j.Site)
+	}
+	if j.Path != "/docs/api" {
+		t.Fatalf("expected path '/docs/api', got %q", j.Path)
 	}
 }
