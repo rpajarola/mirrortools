@@ -190,6 +190,66 @@
       gap: 6px;
       justify-content: flex-end;
     }
+    .btn-sm {
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+    }
+    .site-group {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .site-header {
+      background: #0f172a;
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .site-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .site-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .subtree-group {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .subtree-group:last-child {
+      border-bottom: none;
+    }
+    .subtree-header {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 8px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .subtree-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #94a3b8;
+    }
     /* Log drawer */
     .drawer {
       position: fixed;
@@ -282,33 +342,42 @@
     </form>
   </div>
 
-  <!-- Job Tabs -->
-  <div class="tabs">
-    <button class="tab active" onclick="setTab('all')">All <span class="tab-badge" id="count-all">0</span></button>
-    <button class="tab" onclick="setTab('running')">Active <span class="tab-badge" id="count-running">0</span></button>
-    <button class="tab" onclick="setTab('queued')">Queued <span class="tab-badge" id="count-queued">0</span></button>
-    <button class="tab" onclick="setTab('quarantined')">Quarantined <span class="tab-badge" id="count-quarantined">0</span></button>
-    <button class="tab" onclick="setTab('failed')">Failed <span class="tab-badge" id="count-failed">0</span></button>
-    <button class="tab" onclick="setTab('completed')">Completed <span class="tab-badge" id="count-completed">0</span></button>
+  <!-- Job Tabs & View Mode -->
+  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:16px;">
+    <div class="tabs" style="margin-bottom:0; border-bottom:none; padding-bottom:0;">
+      <button class="tab active" onclick="setTab('all')">All <span class="tab-badge" id="count-all">0</span></button>
+      <button class="tab" onclick="setTab('running')">Active <span class="tab-badge" id="count-running">0</span></button>
+      <button class="tab" onclick="setTab('queued')">Queued <span class="tab-badge" id="count-queued">0</span></button>
+      <button class="tab" onclick="setTab('paused')">Paused <span class="tab-badge" id="count-paused">0</span></button>
+      <button class="tab" onclick="setTab('quarantined')">Quarantined <span class="tab-badge" id="count-quarantined">0</span></button>
+      <button class="tab" onclick="setTab('failed')">Failed <span class="tab-badge" id="count-failed">0</span></button>
+      <button class="tab" onclick="setTab('completed')">Completed <span class="tab-badge" id="count-completed">0</span></button>
+    </div>
+    <div style="display:flex; gap:6px; background:var(--bg); padding:4px; border-radius:var(--radius); border:1px solid var(--border);">
+      <button id="viewTreeBtn" class="btn btn-sm btn-primary" onclick="setViewMode('tree')" style="border:none;">🌳 Site & Subtree</button>
+      <button id="viewFlatBtn" class="btn btn-sm" onclick="setViewMode('flat')" style="border:none; background:transparent;">📋 Flat List</button>
+    </div>
   </div>
 
-  <!-- Jobs table -->
-  <div class="card" style="padding:0; overflow-x:auto;">
-    <table>
-      <thead>
-        <tr>
-          <th style="width:50px;">ID</th>
-          <th style="width:110px;">Method</th>
-          <th>Source & Destination</th>
-          <th style="width:110px;">State</th>
-          <th style="width:130px;">Timing</th>
-          <th style="width:200px; text-align:right;">Actions</th>
-        </tr>
-      </thead>
-      <tbody id="jobsTable">
-        <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">Loading jobs...</td></tr>
-      </tbody>
-    </table>
+  <!-- Jobs dynamic container -->
+  <div id="jobsContainer">
+    <div class="card" style="padding:0; overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:50px;">ID</th>
+            <th style="width:110px;">Method</th>
+            <th>Source & Destination</th>
+            <th style="width:110px;">State</th>
+            <th style="width:130px;">Timing</th>
+            <th style="width:240px; text-align:right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="jobsTable">
+          <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">Loading jobs...</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Log Drawer -->
@@ -351,6 +420,28 @@
     let isPaused = false;
     let activeLogEventSource = null;
     let activeLogJobID = null;
+    let cachedJobs = [];
+    let viewMode = 'tree';
+
+    function setViewMode(mode) {
+      viewMode = mode;
+      const treeBtn = document.getElementById('viewTreeBtn');
+      const flatBtn = document.getElementById('viewFlatBtn');
+      if (treeBtn && flatBtn) {
+        if (mode === 'tree') {
+          treeBtn.className = 'btn btn-sm btn-primary';
+          treeBtn.style.background = '';
+          flatBtn.className = 'btn btn-sm';
+          flatBtn.style.background = 'transparent';
+        } else {
+          flatBtn.className = 'btn btn-sm btn-primary';
+          flatBtn.style.background = '';
+          treeBtn.className = 'btn btn-sm';
+          treeBtn.style.background = 'transparent';
+        }
+      }
+      renderJobs(cachedJobs);
+    }
 
     async function fetchJSON(url, opts = {}) {
       const res = await fetch(url, opts);
@@ -395,74 +486,248 @@
 
     async function loadJobs() {
       try {
-        let url = '/api/v1/jobs?limit=100';
+        let url = '/api/v1/jobs?limit=200&order_by=tree';
         if (currentTab !== 'all') {
           url += `&state=${currentTab}`;
         }
         const jobs = await fetchJSON(url);
-        renderJobs(jobs);
+        cachedJobs = jobs || [];
+        renderJobs(cachedJobs);
       } catch (err) {
         console.error('Failed to load jobs:', err);
       }
     }
 
     function renderJobs(jobs) {
-      const tbody = document.getElementById('jobsTable');
+      const container = document.getElementById('jobsContainer');
       if (!jobs || jobs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">No jobs in this view.</td></tr>';
+        container.innerHTML = '<div class="card" style="padding:40px; text-align:center; color:var(--text-muted);">No jobs in this view.</div>';
         return;
       }
+      if (viewMode === 'flat') {
+        renderFlat(jobs, container);
+      } else {
+        renderTree(jobs, container);
+      }
+    }
 
-      tbody.innerHTML = jobs.map(j => {
-        let timing = '';
-        if (j.state === 'running' && j.started_at) {
-          timing = `Running (${timeAgo(j.started_at)})`;
-        } else if (j.finished_at) {
-          timing = `Finished ${timeAgo(j.finished_at)} ago`;
-        } else {
-          timing = `Created ${timeAgo(j.created_at)} ago`;
+    function renderFlat(jobs, container) {
+      container.innerHTML = `
+        <div class="card" style="padding:0; overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:50px;">ID</th>
+                <th style="width:110px;">Method</th>
+                <th>Source & Destination</th>
+                <th style="width:110px;">State</th>
+                <th style="width:130px;">Timing</th>
+                <th style="width:240px; text-align:right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${jobs.map(renderJobRow).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function getJobSubtree(jobPath, allSitePaths) {
+      if (!jobPath || jobPath === '/' || jobPath === '') return '/';
+      const parts = jobPath.split('/').filter(Boolean);
+      if (parts.length === 0) return '/';
+      if (parts.length === 1) return '/' + parts[0];
+
+      const firstSeg = parts[0];
+      const allShareFirst = allSitePaths.every(p => {
+        const segs = (p || '').split('/').filter(Boolean);
+        return segs.length > 0 && segs[0] === firstSeg;
+      });
+
+      if (allShareFirst && parts.length > 1) {
+        return '/' + parts[0] + '/' + parts[1];
+      }
+      return '/' + parts[0];
+    }
+
+    function renderTree(jobs, container) {
+      // Group by site
+      const siteMap = new Map();
+      for (const j of jobs) {
+        const key = j.site || '(other)';
+        if (!siteMap.has(key)) siteMap.set(key, []);
+        siteMap.get(key).push(j);
+      }
+
+      let html = '';
+      for (const [site, siteJobs] of siteMap.entries()) {
+        const active = siteJobs.filter(j => j.state === 'running').length;
+        const queued = siteJobs.filter(j => j.state === 'queued').length;
+        const paused = siteJobs.filter(j => j.state === 'paused').length;
+        const quarantined = siteJobs.filter(j => j.state === 'quarantined').length;
+        const total = siteJobs.length;
+
+        let siteBtns = '';
+        if (queued > 0) {
+          siteBtns += `<button class="btn btn-sm btn-warning" onclick="batchAction('pause', '${escapeHTML(site)}')">⏸ Pause Site</button>`;
+        }
+        if (paused > 0) {
+          siteBtns += `<button class="btn btn-sm btn-primary" onclick="batchAction('resume', '${escapeHTML(site)}')">▶ Resume Site</button>`;
+        }
+        if (active > 0 || queued > 0 || paused > 0) {
+          siteBtns += `<button class="btn btn-sm" onclick="batchAction('quarantine', '${escapeHTML(site)}', true)">⚠️ Quarantine</button>`;
+          siteBtns += `<button class="btn btn-sm btn-danger" onclick="batchAction('cancel', '${escapeHTML(site)}')">✕ Cancel All</button>`;
+        }
+        if (quarantined > 0) {
+          siteBtns += `<button class="btn btn-sm btn-primary" onclick="batchAction('unquarantine', '${escapeHTML(site)}')">↺ Unquarantine</button>`;
         }
 
-        let actionBtns = `<button class="btn" onclick="openLogDrawer(${j.id}, '${escapeHTML(j.source)}')">Logs</button>`;
-
-        if (j.state === 'running') {
-          actionBtns += `<button class="btn btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
-        } else if (j.state === 'queued') {
-          actionBtns += `<button class="btn btn-warning" onclick="quarantineJob(${j.id})">Quarantine</button>`;
-          actionBtns += `<button class="btn btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
-        } else if (j.state === 'quarantined') {
-          actionBtns += `<button class="btn btn-primary" onclick="unquarantineJob(${j.id})">Retry</button>`;
-          actionBtns += `<button class="btn btn-danger" onclick="deleteJob(${j.id})">Dismiss</button>`;
-        } else if (j.state === 'failed') {
-          actionBtns += `<button class="btn btn-primary" onclick="retryJob(${j.id})">Retry</button>`;
-          actionBtns += `<button class="btn" onclick="deleteJob(${j.id})">Delete</button>`;
-        } else if (j.state === 'completed' || j.state === 'cancelled') {
-          actionBtns += `<button class="btn" onclick="retryJob(${j.id})">Re-run</button>`;
-          actionBtns += `<button class="btn" onclick="deleteJob(${j.id})">Delete</button>`;
+        const allSitePaths = siteJobs.map(j => j.path || '/');
+        const subtreeMap = new Map();
+        for (const j of siteJobs) {
+          const sub = getJobSubtree(j.path, allSitePaths);
+          if (!subtreeMap.has(sub)) subtreeMap.set(sub, []);
+          subtreeMap.get(sub).push(j);
         }
 
-        let extraNote = '';
-        if (j.state === 'quarantined' && j.quarantine_reason) {
-          extraNote = `<div style="font-size:11px;color:var(--quarantine);margin-top:4px;">⚠️ ${escapeHTML(j.quarantine_reason)}</div>`;
-        } else if (j.state === 'failed' && j.last_error) {
-          extraNote = `<div style="font-size:11px;color:var(--danger);margin-top:4px;">⚠️ ${escapeHTML(j.last_error)}</div>`;
+        let subtreesHTML = '';
+        for (const [sub, subJobs] of subtreeMap.entries()) {
+          const subActive = subJobs.filter(j => j.state === 'running').length;
+          const subQueued = subJobs.filter(j => j.state === 'queued').length;
+          const subPaused = subJobs.filter(j => j.state === 'paused').length;
+          const subQuarantined = subJobs.filter(j => j.state === 'quarantined').length;
+
+          let subPrefix = site;
+          if (site !== '(other)' && sub !== '/') {
+            subPrefix = site + sub;
+          }
+
+          let subBtns = '';
+          if (subQueued > 0) {
+            subBtns += `<button class="btn btn-sm btn-warning" onclick="batchAction('pause', '${escapeHTML(subPrefix)}')">⏸ Pause Subtree</button>`;
+          }
+          if (subPaused > 0) {
+            subBtns += `<button class="btn btn-sm btn-primary" onclick="batchAction('resume', '${escapeHTML(subPrefix)}')">▶ Resume Subtree</button>`;
+          }
+          if (subActive > 0 || subQueued > 0 || subPaused > 0) {
+            subBtns += `<button class="btn btn-sm" onclick="batchAction('quarantine', '${escapeHTML(subPrefix)}', true)">⚠️ Quarantine Subtree</button>`;
+            subBtns += `<button class="btn btn-sm btn-danger" onclick="batchAction('cancel', '${escapeHTML(subPrefix)}')">✕ Cancel Subtree</button>`;
+          }
+          if (subQuarantined > 0) {
+            subBtns += `<button class="btn btn-sm btn-primary" onclick="batchAction('unquarantine', '${escapeHTML(subPrefix)}')">↺ Unquarantine</button>`;
+          }
+
+          const hasMultipleSubtrees = subtreeMap.size > 1 || sub !== '/';
+          const subHeader = hasMultipleSubtrees ? `
+            <div class="subtree-header">
+              <div class="subtree-title">
+                📁 <strong>${escapeHTML(sub)}</strong>
+                <span class="tab-badge" style="background:rgba(255,255,255,0.06);">${subJobs.length} job${subJobs.length > 1 ? 's' : ''}</span>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                ${subBtns}
+              </div>
+            </div>
+          ` : '';
+
+          subtreesHTML += `
+            <div class="subtree-group">
+              ${subHeader}
+              <div style="overflow-x:auto;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width:50px;">ID</th>
+                      <th style="width:110px;">Method</th>
+                      <th>Source & Destination</th>
+                      <th style="width:110px;">State</th>
+                      <th style="width:130px;">Timing</th>
+                      <th style="width:240px; text-align:right;">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${subJobs.map(renderJobRow).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `;
         }
 
-        return `
-          <tr>
-            <td class="mono">#${j.id}</td>
-            <td><span class="method-tag mono">${escapeHTML(j.method || 'auto')}</span></td>
-            <td>
-              <div style="font-weight:600;word-break:break-all;">${escapeHTML(j.source)}</div>
-              <div style="font-size:11px;color:var(--text-muted);word-break:break-all;">↳ ${escapeHTML(j.dest_dir || '')}</div>
-              ${extraNote}
-            </td>
-            <td><span class="state-pill state-${j.state}">${j.state}</span></td>
-            <td style="font-size:12px;color:var(--text-muted);">${timing}</td>
-            <td><div class="actions-cell">${actionBtns}</div></td>
-          </tr>
+        html += `
+          <div class="site-group">
+            <div class="site-header">
+              <div class="site-title">
+                🌐 <span>${escapeHTML(site)}</span>
+                <span class="tab-badge" style="background:#1e293b; color:var(--text);">${total} job${total > 1 ? 's' : ''}</span>
+              </div>
+              <div class="site-actions">
+                ${siteBtns}
+              </div>
+            </div>
+            ${subtreesHTML}
+          </div>
         `;
-      }).join('');
+      }
+
+      container.innerHTML = html;
+    }
+
+    function renderJobRow(j) {
+      let timing = '';
+      if (j.state === 'running' && j.started_at) {
+        timing = `Running (${timeAgo(j.started_at)})`;
+      } else if (j.finished_at) {
+        timing = `Finished ${timeAgo(j.finished_at)} ago`;
+      } else {
+        timing = `Created ${timeAgo(j.created_at)} ago`;
+      }
+
+      let actionBtns = `<button class="btn btn-sm" onclick="openLogDrawer(${j.id})">Logs</button>`;
+
+      if (j.state === 'running') {
+        actionBtns += `<button class="btn btn-sm btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
+      } else if (j.state === 'queued') {
+        actionBtns += `<button class="btn btn-sm btn-warning" onclick="pauseJob(${j.id})">Pause</button>`;
+        actionBtns += `<button class="btn btn-sm" onclick="quarantineJob(${j.id})">Quarantine</button>`;
+        actionBtns += `<button class="btn btn-sm btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
+      } else if (j.state === 'paused') {
+        actionBtns += `<button class="btn btn-sm btn-primary" onclick="resumeJob(${j.id})">Resume</button>`;
+        actionBtns += `<button class="btn btn-sm" onclick="quarantineJob(${j.id})">Quarantine</button>`;
+        actionBtns += `<button class="btn btn-sm btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
+      } else if (j.state === 'quarantined') {
+        actionBtns += `<button class="btn btn-sm btn-primary" onclick="unquarantineJob(${j.id})">Retry</button>`;
+        actionBtns += `<button class="btn btn-sm btn-danger" onclick="deleteJob(${j.id})">Dismiss</button>`;
+      } else if (j.state === 'failed') {
+        actionBtns += `<button class="btn btn-sm btn-primary" onclick="retryJob(${j.id})">Retry</button>`;
+        actionBtns += `<button class="btn btn-sm" onclick="deleteJob(${j.id})">Delete</button>`;
+      } else if (j.state === 'completed' || j.state === 'cancelled') {
+        actionBtns += `<button class="btn btn-sm" onclick="retryJob(${j.id})">Re-run</button>`;
+        actionBtns += `<button class="btn btn-sm" onclick="deleteJob(${j.id})">Delete</button>`;
+      }
+
+      let extraNote = '';
+      if (j.state === 'quarantined' && j.quarantine_reason) {
+        extraNote = `<div style="font-size:11px;color:var(--quarantine);margin-top:4px;">⚠️ ${escapeHTML(j.quarantine_reason)}</div>`;
+      } else if (j.state === 'failed' && j.last_error) {
+        extraNote = `<div style="font-size:11px;color:var(--danger);margin-top:4px;">⚠️ ${escapeHTML(j.last_error)}</div>`;
+      }
+
+      return `
+        <tr>
+          <td class="mono">#${j.id}</td>
+          <td><span class="method-tag mono">${escapeHTML(j.method || 'auto')}</span></td>
+          <td>
+            <div style="font-weight:600;word-break:break-all;">${escapeHTML(j.source)}</div>
+            <div style="font-size:11px;color:var(--text-muted);word-break:break-all;">↳ ${escapeHTML(j.dest_dir || '')}</div>
+            ${extraNote}
+          </td>
+          <td><span class="state-pill state-${j.state}">${j.state}</span></td>
+          <td style="font-size:12px;color:var(--text-muted);">${timing}</td>
+          <td><div class="actions-cell">${actionBtns}</div></td>
+        </tr>
+      `;
     }
 
     function timeAgo(dateStr) {
@@ -505,6 +770,39 @@
         body: JSON.stringify({ concurrency: next })
       });
       await loadStatus();
+    }
+
+    async function batchAction(action, prefix, reasonPrompt) {
+      let reason = '';
+      if (action === 'quarantine' && reasonPrompt) {
+        reason = prompt(`Enter quarantine reason for "${prefix}":`, 'manual quarantine via UI');
+        if (reason === null) return;
+      } else if (action === 'cancel') {
+        if (!confirm(`Cancel all jobs matching "${prefix}"?`)) return;
+      }
+      try {
+        await fetchJSON('/api/v1/jobs/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, prefix, reason })
+        });
+        loadStatus();
+        loadJobs();
+      } catch (err) {
+        alert(`Batch ${action} failed: ` + err.message);
+      }
+    }
+
+    async function pauseJob(id) {
+      await fetchJSON(`/api/v1/jobs/${id}/pause`, { method: 'POST' });
+      loadStatus();
+      loadJobs();
+    }
+
+    async function resumeJob(id) {
+      await fetchJSON(`/api/v1/jobs/${id}/resume`, { method: 'POST' });
+      loadStatus();
+      loadJobs();
     }
 
     async function submitJob(e) {
@@ -581,6 +879,10 @@
     // Log Drawer & SSE
     async function openLogDrawer(id, source) {
       activeLogJobID = id;
+      if (!source) {
+        const j = cachedJobs.find(x => x.id === id);
+        source = j ? j.source : '';
+      }
       document.getElementById('drawerTitle').innerText = `Job #${id} Logs`;
       document.getElementById('drawerSubtitle').innerText = source;
       document.getElementById('drawerBody').innerHTML = '';

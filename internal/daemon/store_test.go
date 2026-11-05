@@ -195,3 +195,129 @@ func TestStoreQueueConfigAndCounts(t *testing.T) {
 		t.Fatalf("expected 2 queued, got %+v", counts)
 	}
 }
+
+func TestStoreFairShareAndHierarchicalOrder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Enqueue jobs on siteA and siteB in scrambled path order
+	// Site A: /docs/b, /docs/a
+	// Site B: /files/2, /files/1
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteA.com/docs/b", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteA.com/docs/a", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteB.com/files/2", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteB.com/files/1", DestDir: "/tmp"})
+
+	// First claim: should pick siteA /docs/a (hierarchical path order within siteA)
+	c1, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("claim 1: %v", err)
+	}
+	if c1.Source != "https://siteA.com/docs/a" {
+		t.Fatalf("expected siteA /docs/a first, got %s", c1.Source)
+	}
+
+	// Second claim: siteA is now running, so fair-share across sites MUST pick siteB!
+	c2, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+	if c2.Source != "https://siteB.com/files/1" {
+		t.Fatalf("expected siteB /files/1 second due to fair-share across sites, got %s", c2.Source)
+	}
+
+	// Third claim: both siteA and siteB have running jobs; picks next in path order
+	c3, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("claim 3: %v", err)
+	}
+	if c3.Source != "https://siteA.com/docs/b" {
+		t.Fatalf("expected siteA /docs/b third, got %s", c3.Source)
+	}
+
+	// Fourth claim: remaining job
+	c4, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("claim 4: %v", err)
+	}
+	if c4.Source != "https://siteB.com/files/2" {
+		t.Fatalf("expected siteB /files/2 fourth, got %s", c4.Source)
+	}
+}
+
+func TestStorePrefixOperations(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://example.com/docs/api", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://example.com/docs/guide", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://example.com/downloads/file.iso", DestDir: "/tmp"})
+	s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://other.com/index.html", DestDir: "/tmp"})
+
+	// 1. Pause subtree /docs
+	res, err := s.BatchAction(ctx, &BatchRequest{
+		Action: BatchPause,
+		Prefix: "https://example.com/docs",
+	})
+	if err != nil {
+		t.Fatalf("BatchPause: %v", err)
+	}
+	if res.Affected != 2 {
+		t.Fatalf("expected 2 affected jobs paused, got %d", res.Affected)
+	}
+
+	// Check states: downloads and other.com should still be queued
+	jDownloads, _ := s.GetJob(ctx, 3)
+	if jDownloads.State != StateQueued {
+		t.Fatalf("expected downloads job to remain queued, got %s", jDownloads.State)
+	}
+
+	// 2. Resume subtree /docs
+	res, err = s.BatchAction(ctx, &BatchRequest{
+		Action: BatchResume,
+		Prefix: "https://example.com/docs/",
+	})
+	if err != nil {
+		t.Fatalf("BatchResume: %v", err)
+	}
+	if res.Affected != 2 {
+		t.Fatalf("expected 2 affected jobs resumed, got %d", res.Affected)
+	}
+
+	// 3. Quarantine entire site https://example.com
+	res, err = s.BatchAction(ctx, &BatchRequest{
+		Action: BatchQuarantine,
+		Prefix: "https://example.com",
+		Reason: "testing site quarantine",
+	})
+	if err != nil {
+		t.Fatalf("BatchQuarantine: %v", err)
+	}
+	if res.Affected != 3 {
+		t.Fatalf("expected 3 jobs quarantined on example.com, got %d", res.Affected)
+	}
+
+	// other.com should still be queued
+	jOther, _ := s.GetJob(ctx, 4)
+	if jOther.State != StateQueued {
+		t.Fatalf("expected other.com to remain queued, got %s", jOther.State)
+	}
+
+	// 4. Unquarantine subtree /docs only
+	res, err = s.BatchAction(ctx, &BatchRequest{
+		Action: BatchUnquarantine,
+		Prefix: "https://example.com/docs",
+	})
+	if err != nil {
+		t.Fatalf("BatchUnquarantine: %v", err)
+	}
+	if res.Affected != 2 {
+		t.Fatalf("expected 2 jobs unquarantined, got %d", res.Affected)
+	}
+
+	// downloads should still be quarantined
+	jDownloads, _ = s.GetJob(ctx, 3)
+	if jDownloads.State != StateQuarantined {
+		t.Fatalf("expected downloads to still be quarantined, got %s", jDownloads.State)
+	}
+}

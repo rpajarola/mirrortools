@@ -436,8 +436,9 @@ daemon service,
 can submit and manage mirror requests in a background queue over a local
 Unix domain socket.
 .Bl -tag -width Ds
-.It Ic mirror queue list Op Fl state Ar states Op Fl limit Ar n
-List jobs in the queue, optionally filtering by comma-separated states.
+.It Ic mirror queue list Op Fl state Ar states Op Fl site Ar site Op Fl prefix Ar prefix Op Fl limit Ar n
+List jobs in the queue, optionally filtering by comma-separated states,
+site, or URL prefix.
 .It Ic mirror queue submit Op Ar flags Ar source Op Ar destdir
 (or
 .Ic mirror submit
@@ -447,20 +448,29 @@ Show detailed metadata, timings, and error status for a job.
 .It Ic mirror queue logs Op Fl f Ar id
 Display logs for a job, optionally streaming live updates with
 .Fl f .
-.It Ic mirror queue pause
-Pause queue processing.
-.It Ic mirror queue resume
-Resume queue processing.
+.It Ic mirror queue pause Op Ar id | prefix
+Pause the queue dispatcher, pause an individual job by ID, or pause all
+queued jobs matching a site or subtree prefix (e.g.
+.Li example.com
+or
+.Li https://example.com/docs/
+).
+.It Ic mirror queue resume Op Ar id | prefix
+Resume queue processing, resume a specific paused job, or resume all paused
+jobs matching a site or subtree prefix.
 .It Ic mirror queue concurrency Ar n
 Set the maximum number of simultaneous workers.
-.It Ic mirror queue cancel Ar id
-Cancel an active or queued job.
+.It Ic mirror queue cancel Ar id | prefix
+Cancel an active or queued job, or batch-cancel all jobs matching a site
+or subtree prefix.
 .It Ic mirror queue retry Ar id
 Retry a failed or quarantined job.
-.It Ic mirror queue quarantine Ar id Op Ar reason
-Manually isolate a job to quarantine.
-.It Ic mirror queue unquarantine Ar id
-Return a quarantined job to the queue.
+.It Ic mirror queue quarantine Ar id | prefix Op Ar reason
+Manually isolate an individual job or an entire site/subtree prefix
+to quarantine.
+.It Ic mirror queue unquarantine Ar id | prefix
+Return a quarantined job or all quarantined jobs under a site/subtree prefix
+to the queue.
 .It Ic mirror queue delete Ar id
 Delete a finished or quarantined job.
 .El

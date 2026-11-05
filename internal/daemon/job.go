@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -51,6 +52,80 @@ type Job struct {
 	MaxRetries       int               `json:"max_retries"`
 	LastError        string            `json:"last_error,omitempty"`
 	QuarantineReason string            `json:"quarantine_reason,omitempty"`
+	Site             string            `json:"site"`
+	Path             string            `json:"path"`
+}
+
+// ExtractRoot returns the site/root identifier for grouping URLs.
+// For web URLs with a host: "scheme://host" (e.g. "https://example.com")
+// For sourceforge project URLs: "https://sourceforge.net/projects/<project>"
+// For other sources: method or base.
+func ExtractRoot(source, method string) string {
+	s := strings.TrimSpace(source)
+	if u, err := url.Parse(s); err == nil && u.Host != "" {
+		host := strings.ToLower(u.Host)
+		scheme := strings.ToLower(u.Scheme)
+		if scheme == "" {
+			scheme = "http"
+		}
+		if strings.Contains(host, "sourceforge.net") {
+			parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(parts) >= 2 && parts[0] == "projects" {
+				return scheme + "://" + host + "/projects/" + parts[1]
+			}
+		}
+		return scheme + "://" + host
+	}
+	if method != "" {
+		return method
+	}
+	return "generic"
+}
+
+// ExtractPath returns the subdirectory path portion of a source.
+func ExtractPath(source string) string {
+	s := strings.TrimSpace(source)
+	if u, err := url.Parse(s); err == nil && u.Host != "" {
+		p := u.Path
+		if p == "" {
+			p = "/"
+		}
+		if u.RawQuery != "" {
+			p += "?" + u.RawQuery
+		}
+		return p
+	}
+	return s
+}
+
+// BatchAction defines an action applied to multiple jobs matching a prefix or site.
+type BatchAction string
+
+const (
+	BatchPause        BatchAction = "pause"
+	BatchResume       BatchAction = "resume"
+	BatchQuarantine   BatchAction = "quarantine"
+	BatchUnquarantine BatchAction = "unquarantine"
+	BatchCancel       BatchAction = "cancel"
+	BatchRetry        BatchAction = "retry"
+	BatchDelete       BatchAction = "delete"
+)
+
+// BatchRequest specifies a batch action over jobs matching a prefix or list of IDs.
+type BatchRequest struct {
+	Action BatchAction `json:"action"`
+	Prefix string      `json:"prefix,omitempty"` // URL or prefix (e.g. "https://example.com/docs/")
+	IDs    []int64     `json:"ids,omitempty"`
+	Reason string      `json:"reason,omitempty"` // optional for quarantine
+}
+
+// BatchResult reports the outcome of a batch action.
+type BatchResult struct {
+	Action   BatchAction `json:"action"`
+	Target   string      `json:"target,omitempty"`
+	Matched  int64       `json:"matched"`
+	Affected int64       `json:"affected"`
+	JobIDs   []int64     `json:"job_ids,omitempty"`
 }
 
 // FlagsJSON returns the JSON representation of Flags for storing in the database.

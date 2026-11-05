@@ -18,17 +18,17 @@ import (
 func queueUsage(w io.Writer) {
 	fmt.Fprintf(w, "usage: mirror queue <subcommand> [arguments]\n\n")
 	fmt.Fprintf(w, "subcommands:\n")
-	fmt.Fprintf(w, "  list [-state <s1,s2>] [-limit <n>]  list mirror jobs\n")
+	fmt.Fprintf(w, "  list [-state <s1,s2>] [-site <site>] [-prefix <prefix>] [-limit <n>]  list mirror jobs\n")
 	fmt.Fprintf(w, "  submit [flags] <source> [<destdir>] enqueue a mirror job in the daemon\n")
 	fmt.Fprintf(w, "  status <id>                         show details for a job\n")
 	fmt.Fprintf(w, "  logs [-f] <id>                      show or stream logs for a job\n")
-	fmt.Fprintf(w, "  pause                               pause the queue (running jobs finish)\n")
-	fmt.Fprintf(w, "  resume                              resume queue processing\n")
+	fmt.Fprintf(w, "  pause [<id>|<prefix>]               pause the queue, an individual job, or site/subtree\n")
+	fmt.Fprintf(w, "  resume [<id>|<prefix>]              resume queue processing, an individual job, or site/subtree\n")
 	fmt.Fprintf(w, "  concurrency <n>                     change worker concurrency\n")
-	fmt.Fprintf(w, "  cancel <id>                         cancel a running or queued job\n")
+	fmt.Fprintf(w, "  cancel <id>|<prefix>                cancel a running or queued job, or site/subtree\n")
 	fmt.Fprintf(w, "  retry <id>                          retry a failed or quarantined job\n")
-	fmt.Fprintf(w, "  quarantine <id> [reason]            manually quarantine a job\n")
-	fmt.Fprintf(w, "  unquarantine <id>                   return a quarantined job to the queue\n")
+	fmt.Fprintf(w, "  quarantine <id>|<prefix> [reason]   quarantine a job or an entire site/subtree\n")
+	fmt.Fprintf(w, "  unquarantine <id>|<prefix>          return quarantined job(s) to the queue\n")
 	fmt.Fprintf(w, "  delete <id>                         remove a finished or quarantined job\n")
 }
 
@@ -72,6 +72,8 @@ func queueMain(args []string, cfg *config) {
 	case "list", "ls":
 		fs := flag.NewFlagSet("queue list", flag.ExitOnError)
 		stateFlag := fs.String("state", "", "filter by comma-separated states (queued, running, paused, completed, failed, quarantined, cancelled)")
+		siteFlag := fs.String("site", "", "filter by site/domain (e.g. example.com)")
+		prefixFlag := fs.String("prefix", "", "filter by URL or site prefix")
 		limitFlag := fs.Int("limit", 50, "maximum number of jobs to list")
 		_ = fs.Parse(subArgs)
 
@@ -81,6 +83,8 @@ func queueMain(args []string, cfg *config) {
 				filter.States = append(filter.States, daemon.State(strings.TrimSpace(s)))
 			}
 		}
+		filter.Site = *siteFlag
+		filter.Prefix = *prefixFlag
 		filter.Limit = *limitFlag
 
 		jobs, err := client.ListJobs(ctx, filter)
@@ -196,16 +200,42 @@ func queueMain(args []string, cfg *config) {
 		}
 
 	case "pause":
-		if err := client.PauseQueue(ctx); err != nil {
-			handleClientError(err, cfg)
+		if len(subArgs) == 0 {
+			if err := client.PauseQueue(ctx); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Println("Queue paused. Running jobs will finish, but no new jobs will start.")
+		} else if id, err := strconv.ParseInt(subArgs[0], 10, 64); err == nil {
+			if err := client.PauseJob(ctx, id); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Job #%d paused.\n", id)
+		} else {
+			res, err := client.BatchJobs(ctx, &daemon.BatchRequest{Action: daemon.BatchPause, Prefix: subArgs[0]})
+			if err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Paused %d jobs matching %s.\n", res.Affected, subArgs[0])
 		}
-		fmt.Println("Queue paused. Running jobs will finish, but no new jobs will start.")
 
 	case "resume":
-		if err := client.ResumeQueue(ctx); err != nil {
-			handleClientError(err, cfg)
+		if len(subArgs) == 0 {
+			if err := client.ResumeQueue(ctx); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Println("Queue resumed.")
+		} else if id, err := strconv.ParseInt(subArgs[0], 10, 64); err == nil {
+			if err := client.ResumeJob(ctx, id); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Job #%d resumed.\n", id)
+		} else {
+			res, err := client.BatchJobs(ctx, &daemon.BatchRequest{Action: daemon.BatchResume, Prefix: subArgs[0]})
+			if err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Resumed %d jobs matching %s.\n", res.Affected, subArgs[0])
 		}
-		fmt.Println("Queue resumed.")
 
 	case "concurrency":
 		if len(subArgs) < 1 {
@@ -223,11 +253,22 @@ func queueMain(args []string, cfg *config) {
 		fmt.Printf("Worker concurrency set to %d.\n", n)
 
 	case "cancel":
-		id := requireID("cancel", subArgs)
-		if err := client.CancelJob(ctx, id); err != nil {
-			handleClientError(err, cfg)
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue cancel <id>|<prefix>\n")
+			os.Exit(2)
 		}
-		fmt.Printf("Job #%d cancelled.\n", id)
+		if id, err := strconv.ParseInt(subArgs[0], 10, 64); err == nil {
+			if err := client.CancelJob(ctx, id); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Job #%d cancelled.\n", id)
+		} else {
+			res, err := client.BatchJobs(ctx, &daemon.BatchRequest{Action: daemon.BatchCancel, Prefix: subArgs[0]})
+			if err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Cancelled %d jobs matching %s.\n", res.Affected, subArgs[0])
+		}
 
 	case "retry":
 		id := requireID("retry", subArgs)
@@ -239,29 +280,43 @@ func queueMain(args []string, cfg *config) {
 
 	case "quarantine":
 		if len(subArgs) < 1 {
-			fmt.Fprintf(os.Stderr, "usage: mirror queue quarantine <id> [reason]\n")
-			os.Exit(2)
-		}
-		id, err := strconv.ParseInt(subArgs[0], 10, 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "mirror: invalid job id\n")
+			fmt.Fprintf(os.Stderr, "usage: mirror queue quarantine <id>|<prefix> [reason]\n")
 			os.Exit(2)
 		}
 		reason := "quarantined via CLI"
 		if len(subArgs) > 1 {
 			reason = strings.Join(subArgs[1:], " ")
 		}
-		if err := client.QuarantineJob(ctx, id, reason); err != nil {
-			handleClientError(err, cfg)
+		if id, err := strconv.ParseInt(subArgs[0], 10, 64); err == nil {
+			if err := client.QuarantineJob(ctx, id, reason); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Job #%d quarantined.\n", id)
+		} else {
+			res, err := client.BatchJobs(ctx, &daemon.BatchRequest{Action: daemon.BatchQuarantine, Prefix: subArgs[0], Reason: reason})
+			if err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Quarantined %d jobs matching %s.\n", res.Affected, subArgs[0])
 		}
-		fmt.Printf("Job #%d quarantined.\n", id)
 
 	case "unquarantine":
-		id := requireID("unquarantine", subArgs)
-		if err := client.UnquarantineJob(ctx, id); err != nil {
-			handleClientError(err, cfg)
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue unquarantine <id>|<prefix>\n")
+			os.Exit(2)
 		}
-		fmt.Printf("Job #%d unquarantined and returned to queue.\n", id)
+		if id, err := strconv.ParseInt(subArgs[0], 10, 64); err == nil {
+			if err := client.UnquarantineJob(ctx, id); err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Job #%d unquarantined and returned to queue.\n", id)
+		} else {
+			res, err := client.BatchJobs(ctx, &daemon.BatchRequest{Action: daemon.BatchUnquarantine, Prefix: subArgs[0]})
+			if err != nil {
+				handleClientError(err, cfg)
+			}
+			fmt.Printf("Unquarantined %d jobs matching %s.\n", res.Affected, subArgs[0])
+		}
 
 	case "delete":
 		id := requireID("delete", subArgs)

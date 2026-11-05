@@ -356,6 +356,41 @@ func (q *Queue) UnquarantineJob(ctx context.Context, id int64) error {
 	return err
 }
 
+// BatchJobs applies a batch operation (pause, resume, quarantine, unquarantine, cancel, retry, delete) across jobs matching prefix or explicit IDs.
+func (q *Queue) BatchJobs(ctx context.Context, req *BatchRequest) (*BatchResult, error) {
+	if req.Action == BatchCancel || req.Action == BatchQuarantine {
+		q.mu.Lock()
+		for id, cancel := range q.runningCancels {
+			shouldCancel := false
+			if len(req.IDs) > 0 {
+				for _, tid := range req.IDs {
+					if tid == id {
+						shouldCancel = true
+						break
+					}
+				}
+			} else if req.Prefix != "" {
+				if job, _ := q.store.GetJob(ctx, id); job != nil {
+					if matchPrefix(job.Source, job.Site, req.Prefix, strings.TrimSuffix(req.Prefix, "/")) {
+						shouldCancel = true
+					}
+				}
+			}
+			if shouldCancel {
+				cancel()
+				delete(q.runningCancels, id)
+			}
+		}
+		q.mu.Unlock()
+	}
+
+	result, err := q.store.BatchAction(ctx, req)
+	if err == nil && (req.Action == BatchResume || req.Action == BatchUnquarantine || req.Action == BatchRetry) {
+		q.notify()
+	}
+	return result, err
+}
+
 // GetStatus returns the current queue metrics and active jobs.
 func (q *Queue) GetStatus(ctx context.Context) (*QueueStatus, error) {
 	q.mu.RLock()

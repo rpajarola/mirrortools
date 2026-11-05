@@ -65,6 +65,7 @@ func (s *Server) routes() {
 	// Job-level endpoints
 	s.mux.HandleFunc("GET /api/v1/jobs", s.handleListJobs)
 	s.mux.HandleFunc("POST /api/v1/jobs", s.handleSubmitJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/batch", s.handleBatchJobs)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.handleCancelJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handlePauseJob)
@@ -184,6 +185,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	filter.Method = q.Get("method")
+	filter.Site = q.Get("site")
+	filter.Prefix = q.Get("prefix")
+	filter.OrderBy = q.Get("order_by")
 	if l := q.Get("limit"); l != "" {
 		filter.Limit, _ = strconv.Atoi(l)
 	}
@@ -200,6 +204,25 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		jobs = []*Job{}
 	}
 	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (s *Server) handleBatchJobs(w http.ResponseWriter, r *http.Request) {
+	var req BatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Action == "" {
+		writeError(w, http.StatusBadRequest, "missing action in batch request")
+		return
+	}
+	result, err := s.queue.BatchJobs(r.Context(), &req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcastEvent(fmt.Sprintf("jobs:batch:%s", req.Action))
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {

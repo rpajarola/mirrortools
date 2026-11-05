@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,10 +22,13 @@ var (
 
 // JobFilter allows querying jobs with specific criteria.
 type JobFilter struct {
-	States []State
-	Method string
-	Limit  int
-	Offset int
+	States  []State
+	Method  string
+	Site    string
+	Prefix  string
+	OrderBy string // "tree" for site & path hierarchy, "" for default (id DESC)
+	Limit   int
+	Offset  int
 }
 
 // Store handles persistence of jobs, logs, and queue settings in SQLite.
@@ -53,10 +57,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     retry_count       INTEGER NOT NULL DEFAULT 0,
     max_retries       INTEGER NOT NULL DEFAULT 3,
     last_error        TEXT,
-    quarantine_reason TEXT
+    quarantine_reason TEXT,
+    site              TEXT NOT NULL DEFAULT '',
+    path              TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state_prio ON jobs(state, priority DESC, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_jobs_site_state ON jobs(site, state);
 
 CREATE TABLE IF NOT EXISTS job_logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +99,35 @@ func OpenStore(dbPath string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initializing db schema: %w", err)
+	}
+
+	// Apply migrations for site and path columns if missing in existing databases
+	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN site TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN path TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_site_state ON jobs(site, state);`)
+
+	// Backfill any empty site/path values from source
+	if rows, err := db.Query(`SELECT id, method, source FROM jobs WHERE site = '' OR path = '';`); err == nil {
+		type backfillItem struct {
+			id         int64
+			site, path string
+		}
+		var items []backfillItem
+		for rows.Next() {
+			var id int64
+			var method, source string
+			if err := rows.Scan(&id, &method, &source); err == nil {
+				items = append(items, backfillItem{
+					id:   id,
+					site: ExtractRoot(source, method),
+					path: ExtractPath(source),
+				})
+			}
+		}
+		rows.Close()
+		for _, it := range items {
+			_, _ = db.Exec(`UPDATE jobs SET site = ?, path = ? WHERE id = ?;`, it.site, it.path, it.id)
+		}
 	}
 
 	return &Store{db: db}, nil
@@ -151,11 +187,20 @@ func (s *Store) EnqueueJob(ctx context.Context, job *Job) (*Job, error) {
 	if job.MaxRetries <= 0 {
 		job.MaxRetries = 3
 	}
+	if job.Site == "" {
+		job.Site = ExtractRoot(job.Source, job.Method)
+	}
+	if job.Path == "" {
+		job.Path = ExtractPath(job.Source)
+	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO jobs (method, source, dest_dir, flags_json, state, priority, created_at, retry_count, max_retries)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-	`, job.Method, job.Source, job.DestDir, job.FlagsJSON(), job.State, job.Priority, job.CreatedAt, job.RetryCount, job.MaxRetries)
+		INSERT INTO jobs (
+			method, source, dest_dir, flags_json, state, priority,
+			created_at, retry_count, max_retries, site, path
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`, job.Method, job.Source, job.DestDir, job.FlagsJSON(), job.State, job.Priority,
+		job.CreatedAt, job.RetryCount, job.MaxRetries, job.Site, job.Path)
 	if err != nil {
 		return nil, fmt.Errorf("inserting job: %w", err)
 	}
@@ -176,14 +221,16 @@ func (s *Store) GetJob(ctx context.Context, id int64) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, method, source, dest_dir, flags_json, state, priority,
 		       created_at, started_at, finished_at, retry_count, max_retries,
-		       COALESCE(last_error, ''), COALESCE(quarantine_reason, '')
+		       COALESCE(last_error, ''), COALESCE(quarantine_reason, ''),
+		       site, path
 		FROM jobs WHERE id = ?;
 	`, id)
 
 	return scanJob(row)
 }
 
-// ClaimNextJob finds the highest priority oldest queued job and transitions it to running.
+// ClaimNextJob finds the next queued job, balancing concurrency across sites
+// and ordering systematically by path hierarchy within each site.
 // Returns ErrQueueEmpty if no job is available.
 func (s *Store) ClaimNextJob(ctx context.Context) (*Job, error) {
 	s.mu.Lock()
@@ -198,10 +245,16 @@ func (s *Store) ClaimNextJob(ctx context.Context) (*Job, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, method, source, dest_dir, flags_json, state, priority,
 		       created_at, started_at, finished_at, retry_count, max_retries,
-		       COALESCE(last_error, ''), COALESCE(quarantine_reason, '')
+		       COALESCE(last_error, ''), COALESCE(quarantine_reason, ''),
+		       site, path
 		FROM jobs
 		WHERE state = 'queued'
-		ORDER BY priority DESC, created_at ASC
+		ORDER BY
+			priority DESC,
+			CASE WHEN site IN (SELECT DISTINCT site FROM jobs WHERE state = 'running') THEN 1 ELSE 0 END ASC,
+			site ASC,
+			path ASC,
+			created_at ASC
 		LIMIT 1;
 	`)
 
@@ -355,7 +408,8 @@ func (s *Store) RetryJob(ctx context.Context, id int64) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, method, source, dest_dir, flags_json, state, priority,
 		       created_at, started_at, finished_at, retry_count, max_retries,
-		       COALESCE(last_error, ''), COALESCE(quarantine_reason, '')
+		       COALESCE(last_error, ''), COALESCE(quarantine_reason, ''),
+		       site, path
 		FROM jobs WHERE id = ?;
 	`, id)
 	return scanJob(row)
@@ -456,17 +510,32 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]*Job, error) 
 		where = append(where, "method = ?")
 		args = append(args, filter.Method)
 	}
+	if filter.Site != "" {
+		sClean := strings.TrimRight(filter.Site, "/")
+		if strings.Contains(sClean, "://") {
+			where = append(where, "site = ?")
+			args = append(args, sClean)
+		} else {
+			where = append(where, "(site = ? OR site = ? OR site = ? OR site LIKE ?)")
+			args = append(args, sClean, "https://"+sClean, "http://"+sClean, "%://"+sClean)
+		}
+	}
 
 	query := `
 		SELECT id, method, source, dest_dir, flags_json, state, priority,
 		       created_at, started_at, finished_at, retry_count, max_retries,
-		       COALESCE(last_error, ''), COALESCE(quarantine_reason, '')
+		       COALESCE(last_error, ''), COALESCE(quarantine_reason, ''),
+		       site, path
 		FROM jobs
 	`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
-	query += " ORDER BY id DESC"
+	if filter.OrderBy == "tree" {
+		query += " ORDER BY site ASC, path ASC, id ASC"
+	} else {
+		query += " ORDER BY id DESC"
+	}
 
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -486,6 +555,9 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]*Job, error) 
 		job, err := scanJobRow(rows)
 		if err != nil {
 			return nil, err
+		}
+		if filter.Prefix != "" && !matchPrefix(job.Source, job.Site, filter.Prefix, strings.TrimSuffix(filter.Prefix, "/")) {
+			continue
 		}
 		jobs = append(jobs, job)
 	}
@@ -639,7 +711,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	err := row.Scan(
 		&j.ID, &j.Method, &j.Source, &j.DestDir, &flagsJSON, &j.State, &j.Priority,
 		&j.CreatedAt, &startedAt, &finishedAt, &j.RetryCount, &j.MaxRetries,
-		&j.LastError, &j.QuarantineReason,
+		&j.LastError, &j.QuarantineReason, &j.Site, &j.Path,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -665,7 +737,7 @@ func scanJobRow(rows *sql.Rows) (*Job, error) {
 	err := rows.Scan(
 		&j.ID, &j.Method, &j.Source, &j.DestDir, &flagsJSON, &j.State, &j.Priority,
 		&j.CreatedAt, &startedAt, &finishedAt, &j.RetryCount, &j.MaxRetries,
-		&j.LastError, &j.QuarantineReason,
+		&j.LastError, &j.QuarantineReason, &j.Site, &j.Path,
 	)
 	if err != nil {
 		return nil, err
@@ -678,4 +750,164 @@ func scanJobRow(rows *sql.Rows) (*Job, error) {
 	}
 	j.SetFlagsJSON(flagsJSON)
 	return &j, nil
+}
+
+func matchPrefix(source, site, prefix, noSlash string) bool {
+	if prefix == "" || prefix == "*" || prefix == "all" {
+		return true
+	}
+	if source == prefix || source == noSlash {
+		return true
+	}
+	if site == prefix || site == noSlash {
+		return true
+	}
+	if strings.HasPrefix(source, noSlash+"/") {
+		return true
+	}
+	if u, err := url.Parse(source); err == nil && u.Host != "" {
+		if strings.EqualFold(u.Host, noSlash) || strings.EqualFold(u.Hostname(), noSlash) {
+			return true
+		}
+		siteRoot := u.Scheme + "://" + u.Host
+		if strings.EqualFold(siteRoot, noSlash) || strings.HasPrefix(source, noSlash+"/") {
+			return true
+		}
+		hostAndPath := u.Host + u.Path
+		if strings.EqualFold(hostAndPath, noSlash) || strings.HasPrefix(strings.ToLower(hostAndPath), strings.ToLower(noSlash)+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// matchingJobIDs returns all job IDs matching prefix, optionally filtered by current states.
+func (s *Store) matchingJobIDs(ctx context.Context, prefix string, inStates []State) ([]int64, error) {
+	cleanPrefix := strings.TrimSpace(prefix)
+	cleanNoSlash := strings.TrimSuffix(cleanPrefix, "/")
+
+	query := `SELECT id, source, site FROM jobs WHERE 1=1`
+	var args []any
+
+	if len(inStates) > 0 {
+		placeholders := make([]string, len(inStates))
+		for i, st := range inStates {
+			placeholders[i] = "?"
+			args = append(args, string(st))
+		}
+		query += fmt.Sprintf(" AND state IN (%s)", strings.Join(placeholders, ","))
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var matchedIDs []int64
+	for rows.Next() {
+		var id int64
+		var source, site string
+		if err := rows.Scan(&id, &source, &site); err != nil {
+			return nil, err
+		}
+		if matchPrefix(source, site, cleanPrefix, cleanNoSlash) {
+			matchedIDs = append(matchedIDs, id)
+		}
+	}
+	return matchedIDs, rows.Err()
+}
+
+// BatchAction performs a state change across jobs matching prefix or explicit IDs.
+func (s *Store) BatchAction(ctx context.Context, req *BatchRequest) (*BatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var targetIDs []int64
+	if len(req.IDs) > 0 {
+		targetIDs = req.IDs
+	} else if req.Prefix != "" {
+		var inStates []State
+		switch req.Action {
+		case BatchPause:
+			inStates = []State{StateQueued}
+		case BatchResume:
+			inStates = []State{StatePaused}
+		case BatchQuarantine:
+			inStates = []State{StateQueued, StatePaused, StateFailed, StateRunning}
+		case BatchUnquarantine:
+			inStates = []State{StateQuarantined}
+		case BatchCancel:
+			inStates = []State{StateQueued, StatePaused, StateRunning}
+		case BatchRetry:
+			inStates = []State{StateFailed, StateCompleted, StateCancelled}
+		case BatchDelete:
+			inStates = []State{StateCompleted, StateFailed, StateCancelled, StateQuarantined}
+		}
+		ids, err := s.matchingJobIDs(ctx, req.Prefix, inStates)
+		if err != nil {
+			return nil, err
+		}
+		targetIDs = ids
+	}
+
+	result := &BatchResult{
+		Action:  req.Action,
+		Target:  req.Prefix,
+		Matched: int64(len(targetIDs)),
+		JobIDs:  targetIDs,
+	}
+	if len(targetIDs) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, len(targetIDs))
+	args := make([]any, len(targetIDs))
+	for i, id := range targetIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	now := time.Now().UTC()
+	var updateQuery string
+	var queryArgs []any
+
+	switch req.Action {
+	case BatchPause:
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'paused' WHERE id IN (%s) AND state = 'queued';", inClause)
+		queryArgs = args
+	case BatchResume:
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'queued' WHERE id IN (%s) AND state = 'paused';", inClause)
+		queryArgs = args
+	case BatchQuarantine:
+		reason := "quarantined via batch action"
+		if req.Reason != "" {
+			reason = req.Reason
+		}
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'quarantined', quarantine_reason = ?, finished_at = ? WHERE id IN (%s);", inClause)
+		queryArgs = append([]any{reason, now}, args...)
+	case BatchUnquarantine:
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'queued', quarantine_reason = '', retry_count = 0 WHERE id IN (%s) AND state = 'quarantined';", inClause)
+		queryArgs = args
+	case BatchCancel:
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'cancelled', finished_at = ? WHERE id IN (%s) AND state IN ('queued', 'paused', 'running');", inClause)
+		queryArgs = append([]any{now}, args...)
+	case BatchRetry:
+		updateQuery = fmt.Sprintf("UPDATE jobs SET state = 'queued', last_error = '', quarantine_reason = '', retry_count = 0, started_at = NULL, finished_at = NULL WHERE id IN (%s);", inClause)
+		queryArgs = args
+	case BatchDelete:
+		updateQuery = fmt.Sprintf("DELETE FROM jobs WHERE id IN (%s) AND state IN ('completed', 'failed', 'cancelled', 'quarantined');", inClause)
+		queryArgs = args
+	default:
+		return nil, fmt.Errorf("unknown batch action %q", req.Action)
+	}
+
+	res, err := s.db.ExecContext(ctx, updateQuery, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	result.Affected = n
+	return result, nil
 }

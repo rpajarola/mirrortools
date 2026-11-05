@@ -142,10 +142,19 @@ mirrord -http 127.0.0.1:8080 -password "your-admin-password"
 ```
 
 Open `http://127.0.0.1:8080` in your browser for the real-time Web dashboard,
-queue controls, live log streaming, and in-browser config editing.
+site/subtree hierarchy view, queue controls, live log streaming, and in-browser config editing.
+The dashboard supports toggling between an interactive **Site & Subtree** tree view and a **Flat List** view,
+with one-click pause, resume, quarantine, unquarantine, and cancellation of individual URLs, entire sites, or subtrees.
 When password or OAuth authentication is configured, Web UI sessions use HTTP-only
 cookies and remote REST API clients can pass `Authorization: Bearer <password>`.
 Local CLI commands via Unix socket (`mirror queue`) bypass HTTP authentication automatically.
+
+### Fair-Share Dispatch & Scheduling
+
+When multiple sites are queued simultaneously:
+- **Per-host fair share**: Concurrent worker slots prioritize idle sites so that different domains execute in parallel rather than jumping back-and-forth or starving other hosts.
+- **Hierarchical tree order**: Within each site, queued URLs execute systematically from the root and parent directories downward into subdirectories.
+- **Prefix operations**: Pause, resume, quarantine, unquarantine, or cancel can target single jobs by ID or entire subtrees by URL/site prefix (e.g. `example.com` or `https://example.com/docs/`).
 
 ### Queue CLI
 
@@ -157,16 +166,28 @@ shorthand `mirror submit`):
 mirror queue submit https://sourceforge.net/projects/fsd-amoeba/
 mirror submit -wait 1s https://archive.org/details/nasa-audio
 
-# Inspect the queue
+# Inspect the queue (filterable by state, site, or prefix)
 mirror queue list
+mirror queue list -site example.com
+mirror queue list -prefix https://example.com/docs/
 mirror queue status 1
 mirror queue logs -f 1           # stream live output
 
-# Queue control
-mirror queue pause               # pause processing
-mirror queue resume              # resume processing
+# Queue dispatcher control
+mirror queue pause               # pause queue dispatcher
+mirror queue resume              # resume queue processing
 mirror queue concurrency 4       # adjust worker limit
-mirror queue cancel 1            # cancel a job
+
+# Job, site, and subtree control
+mirror queue pause 1             # pause individual job #1
+mirror queue resume 1            # resume individual job #1
+mirror queue pause example.com/docs/   # pause all queued jobs under subtree
+mirror queue resume example.com/docs/  # resume all paused jobs under subtree
+mirror queue quarantine 1        # quarantine individual job #1
+mirror queue quarantine example.com    # quarantine all jobs for entire site
+mirror queue unquarantine example.com  # return site to queue
+mirror queue cancel 1            # cancel job #1
+mirror queue cancel example.com/docs/  # cancel all jobs under subtree
 mirror queue retry 1             # retry a failed/quarantined job
 ```
 

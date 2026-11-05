@@ -142,6 +142,15 @@ func (c *Client) ListJobs(ctx context.Context, filter JobFilter) ([]*Job, error)
 	if filter.Method != "" {
 		vals.Set("method", filter.Method)
 	}
+	if filter.Site != "" {
+		vals.Set("site", filter.Site)
+	}
+	if filter.Prefix != "" {
+		vals.Set("prefix", filter.Prefix)
+	}
+	if filter.OrderBy != "" {
+		vals.Set("order_by", filter.OrderBy)
+	}
 	if filter.Limit > 0 {
 		vals.Set("limit", strconv.Itoa(filter.Limit))
 	}
@@ -278,6 +287,30 @@ func (c *Client) DeleteJob(ctx context.Context, id int64) error {
 	}
 	defer resp.Body.Close()
 	return checkErr(resp)
+}
+
+// BatchJobs applies a batch operation (pause, resume, quarantine, unquarantine, cancel, retry, delete) by prefix or IDs.
+func (c *Client) BatchJobs(ctx context.Context, req *BatchRequest) (*BatchResult, error) {
+	body, _ := json.Marshal(req)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/api/v1/jobs/batch"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkErr(resp); err != nil {
+		return nil, err
+	}
+
+	var res BatchResult
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // GetLogs returns stored logs for a job.

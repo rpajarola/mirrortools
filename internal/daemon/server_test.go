@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -106,6 +107,94 @@ func TestServerEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("concurrency: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestServerBatchAndFilterEndpoints(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := context.Background()
+
+	// Enqueue jobs across sites
+	s := q.store
+	j1, err := s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteA.com/docs/intro", DestDir: "/tmp/dest"})
+	if err != nil {
+		t.Fatalf("enqueue j1: %v", err)
+	}
+	_, err = s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteA.com/docs/api", DestDir: "/tmp/dest"})
+	if err != nil {
+		t.Fatalf("enqueue j2: %v", err)
+	}
+	j3, err := s.EnqueueJob(ctx, &Job{Method: "http", Source: "https://siteB.com/images/logo.png", DestDir: "/tmp/dest"})
+	if err != nil {
+		t.Fatalf("enqueue j3: %v", err)
+	}
+
+	// Filter list by site
+	req := httptest.NewRequest("GET", "/api/v1/jobs?site=siteA.com", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list jobs by site: %d", rec.Code)
+	}
+	var jobs []*Job
+	json.Unmarshal(rec.Body.Bytes(), &jobs)
+	if len(jobs) != 2 {
+		t.Fatalf("expected 2 jobs for siteA.com, got %d", len(jobs))
+	}
+
+	// Batch pause by prefix
+	body, _ := json.Marshal(BatchRequest{
+		Action: BatchPause,
+		Prefix: "https://siteA.com/docs",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/jobs/batch", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch pause: %d (%s)", rec.Code, rec.Body.String())
+	}
+	var res BatchResult
+	json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Affected != 2 {
+		t.Fatalf("expected 2 jobs paused, got %d", res.Affected)
+	}
+
+	// Verify j1 is paused, j3 is queued
+	j1Updated, _ := s.GetJob(ctx, j1.ID)
+	j3Updated, _ := s.GetJob(ctx, j3.ID)
+	if j1Updated.State != StatePaused || j3Updated.State != StateQueued {
+		t.Fatalf("expected j1 paused and j3 queued, got j1=%s j3=%s", j1Updated.State, j3Updated.State)
+	}
+
+	// Batch resume by site prefix
+	body, _ = json.Marshal(BatchRequest{
+		Action: BatchResume,
+		Prefix: "siteA.com",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/jobs/batch", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch resume: %d", rec.Code)
+	}
+	json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Affected != 2 {
+		t.Fatalf("expected 2 jobs resumed, got %d", res.Affected)
+	}
+
+	// Single job pause and resume endpoints
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%d/pause", j1.ID), nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pause job %d: %d", j1.ID, rec.Code)
+	}
+
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%d/resume", j1.ID), nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume job %d: %d", j1.ID, rec.Code)
 	}
 }
 
