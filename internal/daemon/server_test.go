@@ -3,10 +3,12 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/rpajarola/mirrortools/internal/config"
@@ -195,6 +197,125 @@ func TestServerBatchAndFilterEndpoints(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume job %d: %d", j1.ID, rec.Code)
+	}
+}
+
+func TestServerSiteTransfersAndIgnoresEndpoints(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := context.Background()
+
+	destDir := t.TempDir()
+
+	// 1. Enqueue a job for site
+	_, err := q.store.EnqueueJob(ctx, &Job{
+		Method:  "http",
+		Source:  "https://mysite.com/pub/",
+		DestDir: destDir,
+	})
+	if err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	// 2. Query transfers before .httpmirror.db exists (fallback to jobs)
+	req := httptest.NewRequest("GET", "/api/v1/sites/transfers?site=mysite.com", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get transfers without db: %d", rec.Code)
+	}
+	var resp SiteTransfersResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Site != "mysite.com" && resp.Site != "https://mysite.com" {
+		t.Fatalf("expected site in response, got %s", resp.Site)
+	}
+	if resp.Counts.Future != 1 {
+		t.Fatalf("expected 1 future job in fallback, got %+v", resp.Counts)
+	}
+
+	// 3. Create a real .httpmirror.db in destDir
+	rawDB, err := sql.Open("sqlite", filepath.Join(destDir, ".httpmirror.db"))
+	if err != nil {
+		t.Fatalf("open .httpmirror.db: %v", err)
+	}
+	defer rawDB.Close()
+
+	_, err = rawDB.Exec(`
+		CREATE TABLE urls (
+			id INTEGER PRIMARY KEY,
+			url TEXT NOT NULL UNIQUE,
+			requisite INTEGER NOT NULL,
+			state TEXT NOT NULL DEFAULT 'pending',
+			status INTEGER,
+			error TEXT,
+			etag TEXT,
+			last_modified TEXT
+		);
+		CREATE TABLE ignored_patterns (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			pattern TEXT NOT NULL UNIQUE,
+			created_at DATETIME NOT NULL
+		);
+		INSERT INTO urls (url, requisite, state, status) VALUES ('https://mysite.com/pub/index.html', 0, 'done', 200);
+		INSERT INTO urls (url, requisite, state, status, error) VALUES ('http://deadhost.com/icon.ico', 1, 'error', 0, 'no such host');
+		INSERT INTO urls (url, requisite, state) VALUES ('https://mysite.com/pub/next.html', 0, 'pending');
+	`)
+	if err != nil {
+		t.Fatalf("populate .httpmirror.db: %v", err)
+	}
+
+	// 4. Query transfers with .httpmirror.db
+	req = httptest.NewRequest("GET", "/api/v1/sites/transfers?site=mysite.com", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get transfers with db: %d", rec.Code)
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !resp.HasCrawlerDB {
+		t.Fatal("expected HasCrawlerDB=true")
+	}
+	if resp.Counts.Retrieved != 1 || resp.Counts.Failed != 1 || resp.Counts.Future != 1 {
+		t.Fatalf("unexpected counts: %+v", resp.Counts)
+	}
+
+	// 5. Disable transfer by URL
+	body, _ := json.Marshal(DisableTransferRequest{
+		Site: "mysite.com",
+		URL:  "http://deadhost.com/icon.ico",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/sites/transfers/disable", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable transfer: %d", rec.Code)
+	}
+
+	// 6. Add ignore pattern
+	body, _ = json.Marshal(IgnorePatternRequest{
+		Site:    "mysite.com",
+		Pattern: "*.deadhost.com",
+	})
+	req = httptest.NewRequest("POST", "/api/v1/sites/ignores", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add ignore pattern: %d", rec.Code)
+	}
+
+	// 7. Verify ignore pattern listed
+	req = httptest.NewRequest("GET", "/api/v1/sites/ignores?site=mysite.com", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list ignore patterns: %d", rec.Code)
+	}
+
+	// 8. Remove ignore pattern
+	req = httptest.NewRequest("DELETE", "/api/v1/sites/ignores?site=mysite.com&pattern=*.deadhost.com", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove ignore pattern: %d", rec.Code)
 	}
 }
 

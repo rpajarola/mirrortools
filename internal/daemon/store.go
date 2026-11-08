@@ -522,6 +522,62 @@ func (s *Store) DeleteJob(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SiteInfo describes an indexed site and its storage directory.
+type SiteInfo struct {
+	Site    string  `json:"site"`
+	Method  string  `json:"method"`
+	DestDir string  `json:"dest_dir"`
+	JobIDs  []int64 `json:"job_ids"`
+}
+
+// GetSiteInfo finds the primary destination directory and method for a site.
+func (s *Store) GetSiteInfo(ctx context.Context, site string) (*SiteInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sClean := strings.TrimRight(strings.TrimSpace(site), "/")
+	if sClean == "" {
+		return nil, errors.New("empty site")
+	}
+
+	var where string
+	var args []any
+	if strings.Contains(sClean, "://") {
+		where = "site = ?"
+		args = append(args, sClean)
+	} else {
+		where = "(site = ? OR site = ? OR site = ? OR site LIKE ?)"
+		args = append(args, sClean, "https://"+sClean, "http://"+sClean, "%://"+sClean)
+	}
+
+	query := fmt.Sprintf("SELECT id, method, dest_dir, site FROM jobs WHERE %s ORDER BY id DESC", where)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	info := &SiteInfo{Site: sClean}
+	for rows.Next() {
+		var id int64
+		var method, destDir, rowSite string
+		if err := rows.Scan(&id, &method, &destDir, &rowSite); err == nil {
+			info.JobIDs = append(info.JobIDs, id)
+			if info.DestDir == "" && destDir != "" {
+				info.DestDir = destDir
+				info.Method = method
+				if rowSite != "" {
+					info.Site = rowSite
+				}
+			}
+		}
+	}
+	if len(info.JobIDs) == 0 {
+		return nil, fmt.Errorf("site %q not found in queue", site)
+	}
+	return info, rows.Err()
+}
+
 // ListJobs returns jobs matching the filter.
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]*Job, error) {
 	s.mu.Lock()

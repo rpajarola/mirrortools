@@ -110,7 +110,12 @@ serves an embedded, self-contained single-page dashboard.
 The Web UI provides real-time job monitoring with both hierarchical Site &
 Subtree and Flat List views, site/subtree batch controls, individual job
 pause/resume, live log streaming via Server-Sent Events (SSE), manual
-submission, and in-browser configuration editing.
+submission, in-browser configuration editing, and an interactive Site Transfers
+drawer.
+The Site Transfers view displays retrieved, failed, future, and disabled
+transfers for any site, and enables one-click permanent disabling of defunct
+URLs or third-party requisite hosts without preventing the overall site mirror
+from reaching completion.
 .Sh AUTHENTICATION
 When an HTTP listener is configured, authentication can be enabled to protect
 the Web dashboard and REST API.

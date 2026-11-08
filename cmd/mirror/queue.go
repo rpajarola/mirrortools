@@ -22,6 +22,12 @@ func queueUsage(w io.Writer) {
 	fmt.Fprintf(w, "  submit [flags] <source> [<destdir>] enqueue a mirror job in the daemon\n")
 	fmt.Fprintf(w, "  status <id>                         show details for a job\n")
 	fmt.Fprintf(w, "  logs [-f] <id>                      show or stream logs for a job\n")
+	fmt.Fprintf(w, "  transfers [flags] <site>            view retrieved/failed/future/disabled transfers for a site\n")
+	fmt.Fprintf(w, "  disable <site> <url|pattern>        permanently disable a transfer URL or pattern for a site\n")
+	fmt.Fprintf(w, "  enable <site> <url>                 re-enable a disabled transfer URL for a site\n")
+	fmt.Fprintf(w, "  ignores <site>                      list active ignore patterns for a site\n")
+	fmt.Fprintf(w, "  ignore <site> <pattern>             add an ignore pattern for a site\n")
+	fmt.Fprintf(w, "  unignore <site> <pattern>           remove an ignore pattern for a site\n")
 	fmt.Fprintf(w, "  pause [<id>|<prefix>]               pause the queue, an individual job, or site/subtree\n")
 	fmt.Fprintf(w, "  resume [<id>|<prefix>]              resume queue processing, an individual job, or site/subtree\n")
 	fmt.Fprintf(w, "  concurrency <n>                     change worker concurrency\n")
@@ -198,6 +204,162 @@ func queueMain(args []string, cfg *config) {
 				fmt.Printf("[%s] [%s] %s\n", l.Timestamp.Format("15:04:05"), l.Stream, l.Message)
 			}
 		}
+
+	case "transfers":
+		fs := flag.NewFlagSet("queue transfers", flag.ExitOnError)
+		catFlag := fs.String("category", "", "filter by category: retrieved, failed, future, disabled")
+		stateFlag := fs.String("state", "", "alias for -category")
+		searchFlag := fs.String("search", "", "filter transfers by URL substring")
+		limitFlag := fs.Int("limit", 50, "maximum number of transfers to display")
+		offsetFlag := fs.Int("offset", 0, "pagination offset")
+
+		var cleanArgs []string
+		var site string
+		if len(subArgs) > 0 && !strings.HasPrefix(subArgs[0], "-") {
+			site = subArgs[0]
+			cleanArgs = subArgs[1:]
+		} else {
+			cleanArgs = subArgs
+		}
+		_ = fs.Parse(cleanArgs)
+		if site == "" && fs.NArg() >= 1 {
+			site = fs.Arg(0)
+		}
+		if site == "" {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue transfers [-category <cat>] [-search <q>] [-limit <n>] <site>\n")
+			os.Exit(2)
+		}
+
+		category := *catFlag
+		if category == "" {
+			category = *stateFlag
+		}
+
+		res, err := client.GetSiteTransfers(ctx, site, category, *searchFlag, *limitFlag, *offsetFlag)
+		if err != nil {
+			handleClientError(err, cfg)
+		}
+
+		fmt.Printf("Site: %s (method: %s, dir: %s)\n", res.Site, res.Method, res.DestDir)
+		fmt.Printf("Transfers: %d total — %d retrieved, %d failed, %d future, %d disabled\n",
+			res.Counts.Total, res.Counts.Retrieved, res.Counts.Failed, res.Counts.Future, res.Counts.Disabled)
+
+		if len(res.Ignores) > 0 {
+			fmt.Printf("Ignore Patterns (%d):\n", len(res.Ignores))
+			for _, ig := range res.Ignores {
+				fmt.Printf("  • %s\n", ig.Pattern)
+			}
+		}
+		fmt.Println()
+
+		if len(res.Transfers) == 0 {
+			fmt.Println("No transfers found matching filter.")
+			return
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tCATEGORY\tHTTP\tREQ\tURL\tINFO")
+		for _, t := range res.Transfers {
+			httpStr := "-"
+			if t.Status > 0 {
+				httpStr = strconv.Itoa(t.Status)
+			}
+			reqStr := ""
+			if t.Requisite {
+				reqStr = "req"
+			}
+			info := ""
+			if t.Error != "" {
+				info = truncate(t.Error, 40)
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
+				t.ID, t.Category, httpStr, reqStr, truncate(t.URL, 65), info)
+		}
+		w.Flush()
+
+		if res.TotalMatches > len(res.Transfers) {
+			fmt.Printf("\nShowing %d of %d matching transfers (use -limit and -offset to page)\n", len(res.Transfers), res.TotalMatches)
+		}
+
+	case "disable":
+		if len(subArgs) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue disable <site> <url|pattern>\n")
+			os.Exit(2)
+		}
+		site := subArgs[0]
+		target := subArgs[1]
+		var rawURL, pattern string
+		if strings.Contains(target, "*") || !strings.Contains(target, "://") {
+			pattern = target
+		} else {
+			rawURL = target
+		}
+		if err := client.DisableSiteTransfer(ctx, site, rawURL, pattern); err != nil {
+			handleClientError(err, cfg)
+		}
+		if pattern != "" {
+			fmt.Printf("Disabled transfers matching pattern %q for site %s.\n", pattern, site)
+		} else {
+			fmt.Printf("Disabled transfer %s for site %s.\n", rawURL, site)
+		}
+
+	case "enable":
+		if len(subArgs) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue enable <site> <url>\n")
+			os.Exit(2)
+		}
+		site := subArgs[0]
+		rawURL := subArgs[1]
+		if err := client.EnableSiteTransfer(ctx, site, rawURL); err != nil {
+			handleClientError(err, cfg)
+		}
+		fmt.Printf("Re-enabled transfer %s for site %s.\n", rawURL, site)
+
+	case "ignores":
+		if len(subArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue ignores <site>\n")
+			os.Exit(2)
+		}
+		site := subArgs[0]
+		rules, err := client.ListSiteIgnores(ctx, site)
+		if err != nil {
+			handleClientError(err, cfg)
+		}
+		if len(rules) == 0 {
+			fmt.Printf("No ignore patterns configured for site %s.\n", site)
+			return
+		}
+		fmt.Printf("Ignore patterns for %s (%d):\n", site, len(rules))
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tPATTERN\tCREATED")
+		for _, r := range rules {
+			fmt.Fprintf(w, "%d\t%s\t%s\n", r.ID, r.Pattern, r.CreatedAt.Format("2006-01-02 15:04:05"))
+		}
+		w.Flush()
+
+	case "ignore":
+		if len(subArgs) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue ignore <site> <pattern>\n")
+			os.Exit(2)
+		}
+		site := subArgs[0]
+		pattern := subArgs[1]
+		if err := client.AddSiteIgnore(ctx, site, pattern); err != nil {
+			handleClientError(err, cfg)
+		}
+		fmt.Printf("Added ignore pattern %q for site %s.\n", pattern, site)
+
+	case "unignore":
+		if len(subArgs) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: mirror queue unignore <site> <pattern>\n")
+			os.Exit(2)
+		}
+		site := subArgs[0]
+		pattern := subArgs[1]
+		if err := client.RemoveSiteIgnore(ctx, site, pattern); err != nil {
+			handleClientError(err, cfg)
+		}
+		fmt.Printf("Removed ignore pattern %q for site %s.\n", pattern, site)
 
 	case "pause":
 		if len(subArgs) == 0 {

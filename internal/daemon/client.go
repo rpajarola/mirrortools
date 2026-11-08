@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rpajarola/mirrortools/httpmirror"
 )
 
 // Client is an HTTP client that communicates with mirrord over a Unix domain socket or TCP.
@@ -383,6 +385,112 @@ func (c *Client) postAction(ctx context.Context, endpoint string, body io.Reader
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkErr(resp)
+}
+
+// GetSiteTransfers fetches transfers and metadata for a site.
+func (c *Client) GetSiteTransfers(ctx context.Context, site, category, search string, limit, offset int) (*SiteTransfersResponse, error) {
+	vals := url.Values{}
+	vals.Set("site", site)
+	if category != "" {
+		vals.Set("category", category)
+	}
+	if search != "" {
+		vals.Set("search", search)
+	}
+	if limit > 0 {
+		vals.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		vals.Set("offset", strconv.Itoa(offset))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("/api/v1/sites/transfers?"+vals.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkErr(resp); err != nil {
+		return nil, err
+	}
+
+	var res SiteTransfersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// DisableSiteTransfer permanently disables a transfer URL or pattern for a site.
+func (c *Client) DisableSiteTransfer(ctx context.Context, site, rawURL, pattern string) error {
+	body, _ := json.Marshal(DisableTransferRequest{
+		Site:    site,
+		URL:     rawURL,
+		Pattern: pattern,
+	})
+	return c.postAction(ctx, "/api/v1/sites/transfers/disable", bytes.NewReader(body))
+}
+
+// EnableSiteTransfer re-enables a disabled transfer URL for a site.
+func (c *Client) EnableSiteTransfer(ctx context.Context, site, rawURL string) error {
+	body, _ := json.Marshal(EnableTransferRequest{
+		Site: site,
+		URL:  rawURL,
+	})
+	return c.postAction(ctx, "/api/v1/sites/transfers/enable", bytes.NewReader(body))
+}
+
+// ListSiteIgnores returns all active ignore patterns for a site.
+func (c *Client) ListSiteIgnores(ctx context.Context, site string) ([]*httpmirror.IgnoreRule, error) {
+	vals := url.Values{}
+	vals.Set("site", site)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("/api/v1/sites/ignores?"+vals.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkErr(resp); err != nil {
+		return nil, err
+	}
+
+	var rules []*httpmirror.IgnoreRule
+	if err := json.NewDecoder(resp.Body).Decode(&rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// AddSiteIgnore adds an ignore pattern for a site.
+func (c *Client) AddSiteIgnore(ctx context.Context, site, pattern string) error {
+	body, _ := json.Marshal(IgnorePatternRequest{
+		Site:    site,
+		Pattern: pattern,
+	})
+	return c.postAction(ctx, "/api/v1/sites/ignores", bytes.NewReader(body))
+}
+
+// RemoveSiteIgnore removes an ignore pattern for a site.
+func (c *Client) RemoveSiteIgnore(ctx context.Context, site, pattern string) error {
+	vals := url.Values{}
+	vals.Set("site", site)
+	vals.Set("pattern", pattern)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url("/api/v1/sites/ignores?"+vals.Encode()), nil)
+	if err != nil {
+		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

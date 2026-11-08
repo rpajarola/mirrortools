@@ -310,6 +310,13 @@ a 4xx status.
 Wait
 .Ar duration ,
 such as 1s or 500ms, between requests.
+.It Fl ignore Ar pattern
+Permanently ignore URLs matching
+.Ar pattern
+(can be specified multiple times). Patterns match hostnames (e.g.
+.Li deadhost.com ,
+.Li *.deadhost.com ) ,
+URL prefixes, suffixes, or path globs. Ignored transfers are recorded as disabled and skipped, allowing the crawl to succeed and reach done without error.
 .El
 .Ss icloud
 Downloads iCloud Photos originals.
@@ -448,6 +455,31 @@ Show detailed metadata, timings, and error status for a job.
 .It Ic mirror queue logs Op Fl f Ar id
 Display logs for a job, optionally streaming live updates with
 .Fl f .
+.It Ic mirror queue transfers Op Fl category Ar cat Op Fl search Ar q Op Fl limit Ar n Ar site
+Display retrieved, failed, future, and disabled transfers for
+.Ar site
+along with active ignore patterns.
+.Ar cat
+can be
+.Li retrieved ,
+.Li failed ,
+.Li future ,
+or
+.Li disabled .
+.It Ic mirror queue disable Ar site Ar url|pattern
+Permanently disable an individual transfer URL or pattern for a site. Disabled items are skipped during crawls and do not count as errors, allowing a site to reach completion even when external assets are defunct.
+.It Ic mirror queue enable Ar site Ar url
+Re-enable a previously disabled transfer URL for a site.
+.It Ic mirror queue ignores Ar site
+List active permanent ignore patterns configured for a site.
+.It Ic mirror queue ignore Ar site Ar pattern
+Add a permanent ignore pattern for a site (e.g.
+.Li deadhost.com ,
+.Li *.deadhost.com ,
+or
+.Li */favicon.ico ) .
+.It Ic mirror queue unignore Ar site Ar pattern
+Remove an ignore pattern from a site and re-enable previously matching disabled URLs.
 .It Ic mirror queue pause Op Ar id | prefix
 Pause the queue dispatcher, pause an individual job by ID, or pause all
 queued jobs matching a site or subtree prefix (e.g.

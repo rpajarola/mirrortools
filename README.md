@@ -189,6 +189,19 @@ mirror queue unquarantine example.com  # return site to queue
 mirror queue cancel 1            # cancel job #1
 mirror queue cancel example.com/docs/  # cancel all jobs under subtree
 mirror queue retry 1             # retry a failed/quarantined job
+
+# Inspect per-site transfers (retrieved, failed, future, disabled)
+mirror queue transfers example.com
+mirror queue transfers -category failed example.com
+mirror queue transfers -search icon example.com
+
+# Permanently disable URLs or defunct third-party hosts so site reaches done
+mirror queue disable example.com https://deadhost.com/icon.png
+mirror queue disable example.com deadhost.com    # adds ignore pattern for deadhost
+mirror queue ignores example.com                 # list active ignore patterns
+mirror queue ignore example.com "*.deadhost.com" # add pattern
+mirror queue unignore example.com deadhost.com   # remove pattern
+mirror queue enable example.com https://deadhost.com/icon.png
 ```
 
 ### Batch Enqueuing (`mirrorq`)

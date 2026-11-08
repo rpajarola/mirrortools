@@ -476,3 +476,103 @@ func TestMirrorDelegatesGitRepo(t *testing.T) {
 		t.Errorf("should not leave %s behind when delegating to git", dbFileName)
 	}
 }
+
+func TestMatchPattern(t *testing.T) {
+	cases := []struct {
+		pattern string
+		url     string
+		want    bool
+	}{
+		{"deadhost.com", "http://deadhost.com/icon.png", true},
+		{"deadhost.com", "https://deadhost.com/", true},
+		{"deadhost.com", "http://other.com/deadhost.com", false},
+		{"*.deadhost.com", "http://cdn.deadhost.com/img.jpg", true},
+		{"*.deadhost.com", "http://deadhost.com/img.jpg", true},
+		{"*.deadhost.com", "http://otherdeadhost.com/img.jpg", false},
+		{"http://deadhost.com/*", "http://deadhost.com/icon.gif", true},
+		{"http://deadhost.com/icon.gif", "http://deadhost.com/icon.gif", true},
+		{"http://deadhost.com/icon.gif", "http://deadhost.com/other.gif", false},
+		{"*/favicon.ico", "http://anywhere.org/favicon.ico", true},
+	}
+	for _, c := range cases {
+		got := MatchPattern(c.pattern, c.url)
+		if got != c.want {
+			t.Errorf("MatchPattern(%q, %q) = %v, want %v", c.pattern, c.url, got, c.want)
+		}
+	}
+}
+
+func TestMirrorRequisiteDeadHostCanBeDisabled(t *testing.T) {
+	s := newSite()
+	s.handle("/pub/", page(`<html><head>
+<link rel="icon" href="http://127.0.0.1:1/dead-icon.ico">
+</head><body><p>Hello <a href="page2.html">Page 2</a></p></body></html>`))
+	s.handle("/pub/page2.html", page(`<html><body>Page 2</body></html>`))
+
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	destDir := t.TempDir()
+
+	// 1. Initial run: dead icon will fail to connect (port 1 connection refused)
+	err := Mirror(context.Background(), srv.URL+"/pub/", destDir, Options{})
+	if err == nil {
+		t.Fatal("expected error due to dead icon, got nil")
+	}
+
+	// 2. Check transfer counts: should have 1 failed (the dead icon), some retrieved
+	counts, err := GetTransferCounts(destDir)
+	if err != nil {
+		t.Fatalf("GetTransferCounts: %v", err)
+	}
+	if counts.Failed != 1 {
+		t.Fatalf("expected 1 failed transfer, got %+v", counts)
+	}
+	if counts.Retrieved < 2 {
+		t.Fatalf("expected at least 2 retrieved transfers, got %+v", counts)
+	}
+
+	// 3. Inspect failed transfers
+	transfers, total, err := ListTransfers(destDir, "failed", "", 10, 0)
+	if err != nil {
+		t.Fatalf("ListTransfers: %v", err)
+	}
+	if total != 1 || len(transfers) != 1 {
+		t.Fatalf("expected 1 failed transfer listed, got total=%d len=%d", total, len(transfers))
+	}
+	failedURL := transfers[0].URL
+	if !strings.Contains(failedURL, "127.0.0.1:1") {
+		t.Fatalf("expected failed URL to be port 1, got %s", failedURL)
+	}
+
+	// 4. Disable the failed transfer
+	if err := DisableTransfer(destDir, failedURL); err != nil {
+		t.Fatalf("DisableTransfer: %v", err)
+	}
+
+	// Counts should now show 0 failed, 1 disabled
+	counts, _ = GetTransferCounts(destDir)
+	if counts.Failed != 0 || counts.Disabled != 1 {
+		t.Fatalf("expected 0 failed, 1 disabled, got %+v", counts)
+	}
+
+	// 5. Re-run Mirror: since dead icon is disabled, run MUST SUCCEED (done)!
+	if err := Mirror(context.Background(), srv.URL+"/pub/", destDir, Options{}); err != nil {
+		t.Fatalf("expected run to succeed after disabling dead icon, got %v", err)
+	}
+
+	// 6. Test ignore pattern on another run
+	pattern := "127.0.0.1:1"
+	if err := AddIgnorePattern(destDir, pattern); err != nil {
+		t.Fatalf("AddIgnorePattern: %v", err)
+	}
+	rules, err := ListIgnorePatterns(destDir)
+	if err != nil || len(rules) != 1 || rules[0].Pattern != pattern {
+		t.Fatalf("expected 1 ignore pattern, got %+v", rules)
+	}
+
+	// Run again with -update: still succeeds!
+	if err := Mirror(context.Background(), srv.URL+"/pub/", destDir, Options{Update: true}); err != nil {
+		t.Fatalf("expected update run to succeed with ignored pattern, got %v", err)
+	}
+}

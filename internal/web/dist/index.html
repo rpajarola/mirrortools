@@ -80,6 +80,8 @@
     .btn-danger:hover { background: var(--danger); color: #fff; }
     .btn-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); border-color: rgba(245, 158, 11, 0.4); }
     .btn-warning:hover { background: var(--warning); color: #000; }
+    .btn-info { background: rgba(56, 189, 248, 0.15); color: var(--primary); border-color: rgba(56, 189, 248, 0.3); }
+    .btn-info:hover { background: var(--primary); color: #000; }
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -173,9 +175,12 @@
     .state-running { background: rgba(56, 189, 248, 0.2); color: var(--primary); }
     .state-paused { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
     .state-completed { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .state-retrieved { background: rgba(34, 197, 94, 0.2); color: var(--success); }
     .state-failed { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
     .state-quarantined { background: rgba(217, 70, 239, 0.2); color: var(--quarantine); }
     .state-cancelled { background: rgba(100, 116, 139, 0.2); color: #94a3b8; }
+    .state-future { background: rgba(56, 189, 248, 0.2); color: var(--primary); }
+    .state-disabled { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
     .method-tag {
       background: var(--bg);
@@ -380,8 +385,10 @@
     </div>
   </div>
 
+  <!-- Drawers Overlay -->
+  <div id="drawerOverlay" class="overlay" onclick="closeAllDrawers()"></div>
+
   <!-- Log Drawer -->
-  <div id="drawerOverlay" class="overlay" onclick="closeLogDrawer()"></div>
   <div id="logDrawer" class="drawer">
     <div class="drawer-header">
       <div>
@@ -411,6 +418,84 @@
         <button class="btn" onclick="closeConfigModal()">Cancel</button>
         <button class="btn btn-primary" onclick="saveConfig()">Save & Reload</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Site Transfers Drawer -->
+  <div id="transfersDrawer" class="drawer" style="width:960px; max-width:96vw;">
+    <div class="drawer-header" style="flex-wrap:wrap; gap:12px;">
+      <div style="flex:1; min-width:260px;">
+        <h3 id="transfersDrawerTitle" style="font-size:16px;">Site Transfers</h3>
+        <span id="transfersDrawerSubtitle" style="font-size:11px;color:var(--text-muted);word-break:break-all;"></span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <div style="display:flex; gap:6px; font-size:11px; font-weight:700;">
+          <span class="badge" style="background:#1e293b; color:var(--text);" title="Total transfers">Total: <span id="tstat-all">0</span></span>
+          <span class="badge" style="background:rgba(34,197,94,0.2); color:var(--success);" title="Retrieved">Retrieved: <span id="tstat-retrieved">0</span></span>
+          <span class="badge" style="background:rgba(239,68,68,0.2); color:var(--danger);" title="Failed">Failed: <span id="tstat-failed">0</span></span>
+          <span class="badge" style="background:rgba(56,189,248,0.2); color:var(--primary);" title="Future">Future: <span id="tstat-future">0</span></span>
+          <span class="badge" style="background:rgba(148,163,184,0.2); color:#94a3b8;" title="Disabled">Disabled: <span id="tstat-disabled">0</span></span>
+        </div>
+        <button class="btn" onclick="closeTransfersDrawer()">✕</button>
+      </div>
+    </div>
+
+    <!-- Filter tabs & search -->
+    <div style="padding:12px 16px; border-bottom:1px solid var(--border); background:rgba(255,255,255,0.01); display:flex; flex-direction:column; gap:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div class="tabs" style="margin-bottom:0; border-bottom:none; padding-bottom:0;">
+          <button id="ttab-all" class="tab active" onclick="setTransfersTab('all')">All</button>
+          <button id="ttab-retrieved" class="tab" onclick="setTransfersTab('retrieved')">Retrieved</button>
+          <button id="ttab-failed" class="tab" onclick="setTransfersTab('failed')">Failed</button>
+          <button id="ttab-future" class="tab" onclick="setTransfersTab('future')">Future</button>
+          <button id="ttab-disabled" class="tab" onclick="setTransfersTab('disabled')">Disabled</button>
+          <button id="ttab-ignores" class="tab" onclick="setTransfersTab('ignores')">Ignore Patterns (<span id="tstat-ignores">0</span>)</button>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; min-width:240px;">
+          <input type="text" id="transfersSearchInput" placeholder="Filter URLs..." oninput="onTransfersSearchInput(event)" style="padding:6px 10px; font-size:12px;" />
+        </div>
+      </div>
+      <!-- Add ignore pattern bar -->
+      <div style="display:flex; gap:8px; align-items:center; background:rgba(0,0,0,0.2); padding:6px 10px; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.05);">
+        <span style="font-size:11px; color:var(--text-muted); white-space:nowrap;">Permanently ignore pattern:</span>
+        <input type="text" id="transfersIgnoreInput" placeholder="e.g. deadhost.com, *.deadhost.com, */ads/*" style="flex:1; padding:5px 8px; font-size:12px;" onkeydown="if(event.key==='Enter'){event.preventDefault();addCustomIgnore();}" />
+        <button class="btn btn-sm btn-warning" onclick="addCustomIgnore()" style="white-space:nowrap;">+ Ignore Pattern</button>
+      </div>
+    </div>
+
+    <!-- Drawer main content -->
+    <div style="flex:1; overflow-y:auto; padding:16px;">
+      <!-- Table for transfers -->
+      <div id="transfersTableContainer" style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:50px;">ID</th>
+              <th style="width:90px;">Category</th>
+              <th style="width:60px;">HTTP</th>
+              <th style="width:75px;">Type</th>
+              <th>URL & Details</th>
+              <th style="width:170px; text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="transfersTableBody">
+            <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">Loading transfers...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Ignore Patterns List -->
+      <div id="transfersIgnoreView" style="display:none;">
+        <div style="margin-bottom:12px; font-size:12px; color:var(--text-muted); line-height:1.4;">
+          Ignore patterns permanently suppress transfers matching URL domains (<code>deadhost.com</code>, <code>*.deadhost.com</code>), URL prefixes, or suffixes (e.g. <code>*/favicon.ico</code>). Matching items are marked as disabled and never cause crawl errors or prevent a mirror job from completing.
+        </div>
+        <div id="ignoresListContainer"></div>
+      </div>
+    </div>
+
+    <div class="drawer-footer" style="justify-content:space-between;">
+      <span style="font-size:11px; color:var(--text-muted);">Permanently disabled URLs/patterns do not count as errors and allow the mirror to reach <strong>done</strong>.</span>
+      <button class="btn" onclick="closeTransfersDrawer()">Close</button>
     </div>
   </div>
 
@@ -569,6 +654,9 @@
         const total = siteJobs.length;
 
         let siteBtns = '';
+        if (site !== '(other)') {
+          siteBtns += `<button class="btn btn-sm btn-info" onclick="openSiteTransfers('${escapeHTML(site)}')">📊 Transfers</button>`;
+        }
         if (queued > 0) {
           siteBtns += `<button class="btn btn-sm btn-warning" onclick="batchAction('pause', '${escapeHTML(site)}')">⏸ Pause Site</button>`;
         }
@@ -685,6 +773,9 @@
       }
 
       let actionBtns = `<button class="btn btn-sm" onclick="openLogDrawer(${j.id})">Logs</button>`;
+      if (j.site) {
+        actionBtns += `<button class="btn btn-sm btn-info" onclick="openSiteTransfers('${escapeHTML(j.site)}')">Transfers</button>`;
+      }
 
       if (j.state === 'running') {
         actionBtns += `<button class="btn btn-sm btn-danger" onclick="cancelJob(${j.id})">Cancel</button>`;
@@ -924,6 +1015,12 @@
       document.getElementById('drawerBody').innerHTML = '';
     }
 
+    function closeAllDrawers() {
+      closeLogDrawer();
+      closeConfigModal();
+      closeTransfersDrawer();
+    }
+
     function closeLogDrawer() {
       if (activeLogEventSource) {
         activeLogEventSource.close();
@@ -931,7 +1028,9 @@
       }
       activeLogJobID = null;
       document.getElementById('logDrawer').classList.remove('open');
-      document.getElementById('drawerOverlay').classList.remove('open');
+      if (!currentTransfersSite && !document.getElementById('configModal').classList.contains('open')) {
+        document.getElementById('drawerOverlay').classList.remove('open');
+      }
     }
 
     // Config modal
@@ -948,7 +1047,9 @@
 
     function closeConfigModal() {
       document.getElementById('configModal').classList.remove('open');
-      document.getElementById('drawerOverlay').classList.remove('open');
+      if (!currentTransfersSite && !activeLogJobID) {
+        document.getElementById('drawerOverlay').classList.remove('open');
+      }
     }
 
     async function saveConfig() {
@@ -964,6 +1065,272 @@
         loadStatus();
       } catch (err) {
         alert('Error saving configuration: ' + err.message);
+      }
+    }
+
+    // Transfers Drawer
+    let currentTransfersSite = null;
+    let currentTransfersCategory = 'all';
+    let currentTransfersSearch = '';
+    let searchTimeout = null;
+
+    async function openSiteTransfers(site) {
+      if (!site || site === '(other)') return;
+      currentTransfersSite = site;
+      currentTransfersCategory = 'all';
+      currentTransfersSearch = '';
+      document.getElementById('transfersDrawerTitle').innerText = `Site Transfers: ${site}`;
+      document.getElementById('transfersDrawerSubtitle').innerText = 'Loading...';
+      document.getElementById('transfersSearchInput').value = '';
+      document.getElementById('transfersIgnoreInput').value = '';
+      document.getElementById('transfersDrawer').classList.add('open');
+      document.getElementById('drawerOverlay').classList.add('open');
+      setTransfersTab('all');
+    }
+
+    function closeTransfersDrawer() {
+      currentTransfersSite = null;
+      document.getElementById('transfersDrawer').classList.remove('open');
+      if (!activeLogJobID && !document.getElementById('configModal').classList.contains('open')) {
+        document.getElementById('drawerOverlay').classList.remove('open');
+      }
+    }
+
+    function setTransfersTab(tab) {
+      currentTransfersCategory = tab;
+      document.querySelectorAll('#transfersDrawer .tab').forEach(b => b.classList.remove('active'));
+      const btn = document.getElementById(`ttab-${tab}`);
+      if (btn) btn.classList.add('active');
+      loadSiteTransfers();
+    }
+
+    function onTransfersSearchInput(e) {
+      clearTimeout(searchTimeout);
+      const val = e.target.value.trim();
+      searchTimeout = setTimeout(() => {
+        currentTransfersSearch = val;
+        loadSiteTransfers();
+      }, 250);
+    }
+
+    async function loadSiteTransfers() {
+      if (!currentTransfersSite) return;
+      const site = currentTransfersSite;
+      const tbody = document.getElementById('transfersTableBody');
+      const ignoreView = document.getElementById('transfersIgnoreView');
+      const tableContainer = document.getElementById('transfersTableContainer');
+
+      if (currentTransfersCategory === 'ignores') {
+        tableContainer.style.display = 'none';
+        ignoreView.style.display = 'block';
+        loadSiteIgnores();
+        return;
+      }
+      tableContainer.style.display = 'block';
+      ignoreView.style.display = 'none';
+
+      let url = `/api/v1/sites/transfers?site=${encodeURIComponent(site)}&limit=250`;
+      if (currentTransfersCategory !== 'all') {
+        url += `&category=${encodeURIComponent(currentTransfersCategory)}`;
+      }
+      if (currentTransfersSearch) {
+        url += `&search=${encodeURIComponent(currentTransfersSearch)}`;
+      }
+
+      try {
+        const data = await fetchJSON(url);
+        renderTransfersView(data);
+      } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--danger);padding:24px;">Failed to load transfers: ${escapeHTML(err.message)}</td></tr>`;
+      }
+    }
+
+    function renderTransfersView(data) {
+      document.getElementById('transfersDrawerSubtitle').innerText = data.dest_dir ? `↳ ${data.dest_dir}` : '';
+      const c = data.counts || {};
+      document.getElementById('tstat-all').innerText = c.total || 0;
+      document.getElementById('tstat-retrieved').innerText = c.retrieved || 0;
+      document.getElementById('tstat-failed').innerText = c.failed || 0;
+      document.getElementById('tstat-future').innerText = c.future || 0;
+      document.getElementById('tstat-disabled').innerText = c.disabled || 0;
+      document.getElementById('tstat-ignores').innerText = (data.ignores || []).length;
+
+      const tbody = document.getElementById('transfersTableBody');
+      const transfers = data.transfers || [];
+      if (transfers.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">No transfers found matching filter.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = transfers.map(t => {
+        let catClass = 'state-queued';
+        if (t.category === 'retrieved') catClass = 'state-completed';
+        else if (t.category === 'failed') catClass = 'state-failed';
+        else if (t.category === 'future') catClass = 'state-running';
+        else if (t.category === 'disabled') catClass = 'state-disabled';
+
+        const httpCode = t.status > 0 ? t.status : '-';
+        const reqBadge = t.requisite ? `<span class="badge" style="background:rgba(217,70,239,0.15);color:var(--quarantine);" title="Requisite asset (image, CSS, script, icon)">requisite</span>` : '';
+
+        let actionBtns = '';
+        if (t.category === 'disabled') {
+          actionBtns = `<button class="btn btn-sm btn-primary" onclick="enableTransfer('${escapeHTML(t.url)}')">✓ Enable</button>`;
+        } else {
+          actionBtns = `
+            <button class="btn btn-sm btn-danger" onclick="disableTransfer('${escapeHTML(t.url)}')">🚫 Disable</button>
+            <button class="btn btn-sm" onclick="disableHost('${escapeHTML(t.url)}')" title="Disable entire host/domain">🚫 Host</button>
+          `;
+        }
+
+        let errorDetail = '';
+        if (t.error) {
+          errorDetail = `<div style="font-size:11px;color:${t.category === 'disabled' ? 'var(--text-muted)' : 'var(--danger)'};margin-top:2px;">${escapeHTML(t.error)}</div>`;
+        }
+
+        return `
+          <tr>
+            <td class="mono" style="font-size:11px;">#${t.id}</td>
+            <td><span class="state-pill ${catClass}">${escapeHTML(t.category)}</span></td>
+            <td class="mono" style="font-size:11px;">${httpCode}</td>
+            <td>${reqBadge}</td>
+            <td>
+              <div class="mono" style="word-break:break-all;font-size:12px;">
+                <a href="${escapeHTML(t.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:none;">${escapeHTML(t.url)}</a>
+              </div>
+              ${errorDetail}
+            </td>
+            <td><div class="actions-cell">${actionBtns}</div></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function loadSiteIgnores() {
+      if (!currentTransfersSite) return;
+      const container = document.getElementById('ignoresListContainer');
+      try {
+        const rules = await fetchJSON(`/api/v1/sites/ignores?site=${encodeURIComponent(currentTransfersSite)}`);
+        document.getElementById('tstat-ignores').innerText = rules.length;
+        if (rules.length === 0) {
+          container.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-muted);">No ignore patterns configured for this site yet.</div>`;
+          return;
+        }
+        container.innerHTML = `
+          <table style="width:100%;">
+            <thead>
+              <tr>
+                <th style="width:60px;">ID</th>
+                <th>Pattern</th>
+                <th style="width:160px;">Added</th>
+                <th style="width:100px;text-align:right;">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rules.map(r => `
+                <tr>
+                  <td class="mono">#${r.id}</td>
+                  <td class="mono" style="font-weight:600;color:var(--warning);">${escapeHTML(r.pattern)}</td>
+                  <td style="font-size:12px;color:var(--text-muted);">${timeAgo(r.created_at)} ago</td>
+                  <td style="text-align:right;">
+                    <button class="btn btn-sm btn-danger" onclick="removeIgnoreRule('${escapeHTML(r.pattern)}')">Remove</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (err) {
+        container.innerHTML = `<div style="padding:20px;color:var(--danger);">Failed to load ignore patterns: ${escapeHTML(err.message)}</div>`;
+      }
+    }
+
+    async function disableTransfer(rawURL) {
+      if (!currentTransfersSite) return;
+      try {
+        await fetchJSON('/api/v1/sites/transfers/disable', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ site: currentTransfersSite, url: rawURL })
+        });
+        loadSiteTransfers();
+      } catch (err) {
+        alert('Failed to disable transfer: ' + err.message);
+      }
+    }
+
+    async function disableHost(rawURL) {
+      if (!currentTransfersSite) return;
+      let host = '';
+      try {
+        host = new URL(rawURL).host;
+      } catch (e) {
+        const m = rawURL.match(/^[a-zA-Z]+:\/\/([^/?#]+)/);
+        if (m) host = m[1];
+      }
+      if (!host) {
+        alert('Could not determine host from URL.');
+        return;
+      }
+      const pattern = prompt(`Permanently ignore all requests to host "${host}"? (e.g. ${host} or *.${host}):`, host);
+      if (!pattern) return;
+      try {
+        await fetchJSON('/api/v1/sites/transfers/disable', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ site: currentTransfersSite, pattern: pattern.trim() })
+        });
+        loadSiteTransfers();
+      } catch (err) {
+        alert('Failed to add ignore pattern: ' + err.message);
+      }
+    }
+
+    async function enableTransfer(rawURL) {
+      if (!currentTransfersSite) return;
+      try {
+        await fetchJSON('/api/v1/sites/transfers/enable', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ site: currentTransfersSite, url: rawURL })
+        });
+        loadSiteTransfers();
+      } catch (err) {
+        alert('Failed to re-enable transfer: ' + err.message);
+      }
+    }
+
+    async function addCustomIgnore() {
+      if (!currentTransfersSite) return;
+      const input = document.getElementById('transfersIgnoreInput');
+      const pattern = input.value.trim();
+      if (!pattern) return;
+      try {
+        await fetchJSON('/api/v1/sites/ignores', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ site: currentTransfersSite, pattern })
+        });
+        input.value = '';
+        if (currentTransfersCategory === 'ignores') {
+          loadSiteIgnores();
+        } else {
+          loadSiteTransfers();
+        }
+      } catch (err) {
+        alert('Failed to add ignore pattern: ' + err.message);
+      }
+    }
+
+    async function removeIgnoreRule(pattern) {
+      if (!currentTransfersSite) return;
+      if (!confirm(`Remove ignore pattern "${pattern}"? Disabled transfers matching this rule will be re-enabled.`)) return;
+      try {
+        await fetchJSON(`/api/v1/sites/ignores?site=${encodeURIComponent(currentTransfersSite)}&pattern=${encodeURIComponent(pattern)}`, {
+          method: 'DELETE'
+        });
+        loadSiteIgnores();
+      } catch (err) {
+        alert('Failed to remove ignore pattern: ' + err.message);
       }
     }
 
@@ -986,6 +1353,9 @@
       es.onmessage = e => {
         loadStatus();
         loadJobs();
+        if (currentTransfersSite && e.data && (e.data.startsWith('transfers:') || e.data.startsWith('site:'))) {
+          loadSiteTransfers();
+        }
       };
     }
 

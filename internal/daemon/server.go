@@ -77,6 +77,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/logs", s.handleGetLogs)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/logs/stream", s.handleStreamLogs)
 
+	// Site & transfer endpoints
+	s.mux.HandleFunc("GET /api/v1/sites/transfers", s.handleGetSiteTransfers)
+	s.mux.HandleFunc("POST /api/v1/sites/transfers/disable", s.handleDisableSiteTransfer)
+	s.mux.HandleFunc("POST /api/v1/sites/transfers/enable", s.handleEnableSiteTransfer)
+	s.mux.HandleFunc("GET /api/v1/sites/ignores", s.handleListSiteIgnores)
+	s.mux.HandleFunc("POST /api/v1/sites/ignores", s.handleAddSiteIgnore)
+	s.mux.HandleFunc("DELETE /api/v1/sites/ignores", s.handleRemoveSiteIgnore)
+
 	// Real-time events & config
 	s.mux.HandleFunc("GET /api/v1/events", s.handleStreamEvents)
 	s.mux.HandleFunc("GET /api/v1/config", s.handleGetConfig)

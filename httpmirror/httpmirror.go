@@ -58,8 +58,17 @@ func init() {
 		SetupFlags: func(fs *flag.FlagSet) mirror.Func {
 			update := fs.Bool("update", false, "re-check everything already mirrored (conditional requests) and pick up new files")
 			wait := fs.Duration("wait", 0, "delay between requests")
+			ignore := fs.String("ignore", "", "comma-separated URLs, hosts, or patterns to ignore (e.g. deadhost.com, *.deadhost.com)")
 			return func(ctx context.Context, source, destDir string) error {
-				return Mirror(ctx, source, destDir, Options{Update: *update, Wait: *wait})
+				var ignores []string
+				if *ignore != "" {
+					for _, p := range strings.Split(*ignore, ",") {
+						if s := strings.TrimSpace(p); s != "" {
+							ignores = append(ignores, s)
+						}
+					}
+				}
+				return Mirror(ctx, source, destDir, Options{Update: *update, Wait: *wait, Ignore: ignores})
 			}
 		},
 		// Any web URL that a more specific method doesn't claim.
@@ -79,6 +88,8 @@ type Options struct {
 	Update bool
 	// Wait is slept before every request but the first.
 	Wait time.Duration
+	// Ignore specifies patterns, hosts, or URLs to permanently ignore.
+	Ignore []string
 }
 
 // dbFileName is the crawl state database, kept in destDir itself — above
@@ -102,10 +113,11 @@ var initialBackoff = 5 * time.Second
 
 // URL states in the database.
 const (
-	statePending = "pending" // not handled yet
-	stateDone    = "done"    // saved, or (listings, redirects) fully processed
-	stateError   = "error"   // transient failure (network, 5xx, local I/O); retried on the next run
-	stateFailed  = "failed"  // permanent failure (4xx); retried only with -update
+	statePending  = "pending"  // not handled yet (future)
+	stateDone     = "done"     // saved, or (listings, redirects) fully processed (retrieved)
+	stateError    = "error"    // transient failure (network, 5xx, local I/O); retried on the next run
+	stateFailed   = "failed"   // permanent failure (4xx); retried only with -update
+	stateDisabled = "disabled" // permanently disabled / ignored by user
 )
 
 const schema = `
@@ -124,7 +136,52 @@ CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ignored_patterns (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	pattern    TEXT NOT NULL UNIQUE,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
+
+// TransferState is the state of a transfer URL.
+type TransferState string
+
+const (
+	TransferPending  TransferState = "pending"
+	TransferDone     TransferState = "done"
+	TransferError    TransferState = "error"
+	TransferFailed   TransferState = "failed"
+	TransferDisabled TransferState = "disabled"
+)
+
+// Transfer represents a single URL transfer recorded in .httpmirror.db.
+type Transfer struct {
+	ID           int64         `json:"id"`
+	URL          string        `json:"url"`
+	Requisite    bool          `json:"requisite"`
+	State        TransferState `json:"state"`
+	Category     string        `json:"category"` // "retrieved", "failed", "future", "disabled"
+	Status       int           `json:"status"`
+	Error        string        `json:"error,omitempty"`
+	ETag         string        `json:"etag,omitempty"`
+	LastModified string        `json:"last_modified,omitempty"`
+}
+
+// TransferCounts summarizes transfer states for a site.
+type TransferCounts struct {
+	Total     int `json:"total"`
+	Retrieved int `json:"retrieved"`
+	Failed    int `json:"failed"`
+	Future    int `json:"future"`
+	Disabled  int `json:"disabled"`
+}
+
+// IgnoreRule is an ignored host, prefix, or pattern for a site.
+type IgnoreRule struct {
+	ID        int64     `json:"id"`
+	Pattern   string    `json:"pattern"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
 // crawler holds the state of one Mirror run.
 type crawler struct {
@@ -135,6 +192,7 @@ type crawler struct {
 	opts     Options
 	requests int
 	errors   int
+	ignores  []string
 }
 
 // statusError is a non-retryable HTTP response (a 4xx other than 408/429).
@@ -221,9 +279,32 @@ func Mirror(ctx context.Context, source, destDir string, opts Options) error {
 	c.scope = &url.URL{Scheme: root.Scheme, Host: root.Host, Path: dirOf(root.Path)}
 	log.Printf("http: mirroring %s into %s", c.scope, destDir)
 
-	reset := `UPDATE urls SET state = 'pending' WHERE state = 'error'`
+	// Load stored ignore patterns and merge with CLI/option patterns
+	var patterns []string
+	if rows, err := db.QueryContext(ctx, `SELECT pattern FROM ignored_patterns`); err == nil {
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err == nil && p != "" {
+				patterns = append(patterns, p)
+			}
+		}
+		rows.Close()
+	}
+	for _, ign := range opts.Ignore {
+		ign = strings.TrimSpace(ign)
+		if ign != "" {
+			patterns = append(patterns, ign)
+			_, _ = db.ExecContext(ctx, `INSERT OR IGNORE INTO ignored_patterns(pattern) VALUES (?)`, ign)
+		}
+	}
+	c.ignores = patterns
+	if len(c.ignores) > 0 {
+		c.applyIgnorePatterns(ctx)
+	}
+
+	reset := `UPDATE urls SET state = 'pending' WHERE state = 'error' AND state != 'disabled'`
 	if opts.Update {
-		reset = `UPDATE urls SET state = 'pending'`
+		reset = `UPDATE urls SET state = 'pending' WHERE state != 'disabled'`
 	}
 	if _, err := db.ExecContext(ctx, reset); err != nil {
 		return err
@@ -253,6 +334,8 @@ func openDB(dbPath string) (*sql.DB, error) {
 	// One connection: the crawl is sequential, and it sidesteps SQLite's
 	// locking between connections of the same process.
 	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initializing %s: %w", dbPath, err)
@@ -333,6 +416,10 @@ func (c *crawler) run(ctx context.Context) error {
 		u, err := url.Parse(raw)
 		if err != nil {
 			c.setState(ctx, id, stateFailed, 0, err.Error())
+			continue
+		}
+		if c.isIgnored(raw) {
+			c.setState(ctx, id, stateDisabled, 0, "ignored by rule")
 			continue
 		}
 		if !requisite && !c.inScope(u) {
@@ -549,10 +636,18 @@ func (c *crawler) enqueue(ctx context.Context, u *url.URL, requisite bool) error
 	if !requisite && !c.inScope(u) {
 		return nil
 	}
+	raw := u.String()
+	st := statePending
+	var errStr *string
+	if c.isIgnored(raw) {
+		st = stateDisabled
+		msg := "ignored by rule"
+		errStr = &msg
+	}
 	_, err := c.db.ExecContext(ctx,
-		`INSERT INTO urls(url, requisite) VALUES (?, ?)
+		`INSERT INTO urls(url, requisite, state, error) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(url) DO UPDATE SET requisite = MIN(requisite, excluded.requisite)`,
-		u.String(), requisite)
+		raw, requisite, st, errStr)
 	return err
 }
 
@@ -866,4 +961,383 @@ func extractCSS(css string, base *url.URL) []*url.URL {
 		}
 	}
 	return out
+}
+
+func (c *crawler) isIgnored(rawURL string) bool {
+	for _, p := range c.ignores {
+		if MatchPattern(p, rawURL) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *crawler) applyIgnorePatterns(ctx context.Context) {
+	rows, err := c.db.QueryContext(ctx, `SELECT id, url FROM urls WHERE state != 'done' AND state != 'disabled'`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var toDisable []int64
+	for rows.Next() {
+		var id int64
+		var rawURL string
+		if err := rows.Scan(&id, &rawURL); err == nil {
+			if c.isIgnored(rawURL) {
+				toDisable = append(toDisable, id)
+			}
+		}
+	}
+	rows.Close()
+	for _, id := range toDisable {
+		_, _ = c.db.ExecContext(ctx, `UPDATE urls SET state = 'disabled', error = 'ignored by rule' WHERE id = ?`, id)
+	}
+}
+
+// MatchPattern reports whether rawURL matches an ignore pattern.
+// A pattern can be:
+//   - An exact URL ("http://deadhost.com/icon.png")
+//   - A hostname or domain ("deadhost.com", matches any URL on that host)
+//   - A wildcard subdomain ("*.deadhost.com")
+//   - A URL prefix with wildcard ("http://deadhost.com/*")
+//   - A glob pattern ("*/favicon.ico")
+func MatchPattern(pattern, rawURL string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	if rawURL == pattern {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	if err == nil && u.Host != "" {
+		host := u.Hostname()
+		if strings.EqualFold(host, pattern) {
+			return true
+		}
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := strings.TrimPrefix(pattern, "*.")
+			if strings.EqualFold(host, suffix) || strings.HasSuffix(strings.ToLower(host), "."+strings.ToLower(suffix)) {
+				return true
+			}
+		}
+		if !strings.Contains(pattern, "://") {
+			hostAndPath := u.Host + u.Path
+			cleanPattern := strings.TrimSuffix(pattern, "*")
+			if strings.EqualFold(hostAndPath, pattern) || strings.HasPrefix(strings.ToLower(hostAndPath), strings.ToLower(cleanPattern)) {
+				return true
+			}
+		}
+		if strings.HasPrefix(pattern, "/") && u.Path == pattern {
+			return true
+		}
+	}
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		if strings.HasPrefix(rawURL, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(pattern, "*") {
+		suffix := strings.TrimPrefix(pattern, "*")
+		if strings.HasSuffix(rawURL, suffix) {
+			return true
+		}
+	}
+	if matched, _ := path.Match(pattern, rawURL); matched {
+		return true
+	}
+	return false
+}
+
+// DBExists reports whether a .httpmirror.db exists in destDir.
+func DBExists(destDir string) bool {
+	dbPath := filepath.Join(destDir, dbFileName)
+	fi, err := os.Stat(dbPath)
+	return err == nil && !fi.IsDir()
+}
+
+// GetTransferCounts returns summary counts of transfers by category.
+func GetTransferCounts(destDir string) (*TransferCounts, error) {
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return &TransferCounts{}, nil
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	counts := &TransferCounts{}
+	rows, err := db.Query(`SELECT state, COUNT(*) FROM urls GROUP BY state`)
+	if err != nil {
+		return counts, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var st string
+		var count int
+		if err := rows.Scan(&st, &count); err == nil {
+			counts.Total += count
+			switch st {
+			case stateDone:
+				counts.Retrieved += count
+			case statePending:
+				counts.Future += count
+			case stateError, stateFailed:
+				counts.Failed += count
+			case stateDisabled:
+				counts.Disabled += count
+			}
+		}
+	}
+	return counts, rows.Err()
+}
+
+// ListTransfers queries transfers filtered by category and search term.
+func ListTransfers(destDir string, category string, search string, limit, offset int) ([]*Transfer, int, error) {
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return []*Transfer{}, 0, nil
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	var conds []string
+	var args []any
+
+	switch strings.ToLower(category) {
+	case "retrieved", "done":
+		conds = append(conds, "state = 'done'")
+	case "future", "pending":
+		conds = append(conds, "state = 'pending'")
+	case "failed", "error":
+		conds = append(conds, "state IN ('failed', 'error')")
+	case "disabled":
+		conds = append(conds, "state = 'disabled'")
+	}
+
+	if search != "" {
+		conds = append(conds, "url LIKE ?")
+		args = append(args, "%"+search+"%")
+	}
+
+	whereClause := ""
+	if len(conds) > 0 {
+		whereClause = "WHERE " + strings.Join(conds, " AND ")
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM urls " + whereClause
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 {
+		limit = 100
+	}
+	query := fmt.Sprintf(`
+		SELECT id, url, requisite, state, COALESCE(status, 0), COALESCE(error, ''), COALESCE(etag, ''), COALESCE(last_modified, '')
+		FROM urls %s
+		ORDER BY id ASC
+		LIMIT %d OFFSET %d
+	`, whereClause, limit, offset)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var list []*Transfer
+	for rows.Next() {
+		var t Transfer
+		var st string
+		var reqInt int
+		if err := rows.Scan(&t.ID, &t.URL, &reqInt, &st, &t.Status, &t.Error, &t.ETag, &t.LastModified); err != nil {
+			return nil, 0, err
+		}
+		t.Requisite = (reqInt != 0)
+		t.State = TransferState(st)
+		switch st {
+		case stateDone:
+			t.Category = "retrieved"
+		case statePending:
+			t.Category = "future"
+		case stateError, stateFailed:
+			t.Category = "failed"
+		case stateDisabled:
+			t.Category = "disabled"
+		default:
+			t.Category = st
+		}
+		list = append(list, &t)
+	}
+	return list, total, rows.Err()
+}
+
+// DisableTransfer marks a transfer URL as disabled so it won't be fetched or count as an error.
+func DisableTransfer(destDir string, rawURL string) error {
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database %s not found", dbPath)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	_, err = db.Exec(`UPDATE urls SET state = 'disabled', error = 'disabled by user' WHERE url = ?`, rawURL)
+	return err
+}
+
+// EnableTransfer re-enables a disabled transfer URL back to pending.
+func EnableTransfer(destDir string, rawURL string) error {
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database %s not found", dbPath)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	_, err = db.Exec(`UPDATE urls SET state = 'pending', error = NULL WHERE url = ?`, rawURL)
+	return err
+}
+
+// ListIgnorePatterns returns all active ignore patterns in the site's database.
+func ListIgnorePatterns(destDir string) ([]*IgnoreRule, error) {
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return []*IgnoreRule{}, nil
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	rows, err := db.Query(`SELECT id, pattern, created_at FROM ignored_patterns ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []*IgnoreRule
+	for rows.Next() {
+		var r IgnoreRule
+		if err := rows.Scan(&r.ID, &r.Pattern, &r.CreatedAt); err == nil {
+			rules = append(rules, &r)
+		}
+	}
+	return rules, rows.Err()
+}
+
+// AddIgnorePattern adds a pattern to ignored_patterns and disables matching non-done URLs.
+func AddIgnorePattern(destDir string, pattern string) error {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return errors.New("empty pattern")
+	}
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database %s not found", dbPath)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	now := time.Now().UTC()
+	_, err = db.Exec(`INSERT OR IGNORE INTO ignored_patterns(pattern, created_at) VALUES (?, ?)`, pattern, now)
+	if err != nil {
+		return err
+	}
+
+	// Update existing non-done URLs matching pattern
+	rows, err := db.Query(`SELECT id, url FROM urls WHERE state != 'done' AND state != 'disabled'`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var u string
+		if err := rows.Scan(&id, &u); err == nil {
+			if MatchPattern(pattern, u) {
+				ids = append(ids, id)
+			}
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_, _ = db.Exec(`UPDATE urls SET state = 'disabled', error = ? WHERE id = ?`, "ignored by pattern "+pattern, id)
+	}
+	return nil
+}
+
+// RemoveIgnorePattern deletes a pattern from ignored_patterns and re-enables previously matching disabled URLs.
+func RemoveIgnorePattern(destDir string, pattern string) error {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return errors.New("empty pattern")
+	}
+	dbPath := filepath.Join(destDir, dbFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database %s not found", dbPath)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
+	_, err = db.Exec(`DELETE FROM ignored_patterns WHERE pattern = ?`, pattern)
+	if err != nil {
+		return err
+	}
+
+	// Re-enable disabled URLs that were disabled by this pattern
+	rows, err := db.Query(`SELECT id, url FROM urls WHERE state = 'disabled' AND error LIKE ?`, "%"+pattern+"%")
+	if err == nil {
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			var u string
+			if err := rows.Scan(&id, &u); err == nil {
+				if MatchPattern(pattern, u) {
+					ids = append(ids, id)
+				}
+			}
+		}
+		rows.Close()
+		for _, id := range ids {
+			_, _ = db.Exec(`UPDATE urls SET state = 'pending', error = NULL WHERE id = ?`, id)
+		}
+	}
+	return nil
 }
