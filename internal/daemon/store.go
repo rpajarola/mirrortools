@@ -117,6 +117,10 @@ func OpenStore(dbPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("creating idx_jobs_site_state: %w", err)
 	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_dedup ON jobs(source, method, dest_dir);`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating idx_jobs_dedup: %w", err)
+	}
 
 	// Backfill any empty site/path values from source
 	if rows, err := db.Query(`SELECT id, method, source FROM jobs WHERE site = '' OR path = '';`); err == nil {
@@ -242,6 +246,143 @@ func (s *Store) EnqueueJob(ctx context.Context, job *Job) (*Job, error) {
 		return nil, err
 	}
 	job.ID = id
+	return job, nil
+}
+
+// FindMethodBySource returns the method of an existing job with the exact source, if any.
+func (s *Store) FindMethodBySource(ctx context.Context, source string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var method string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT method FROM jobs WHERE source = ? ORDER BY id DESC LIMIT 1;
+	`, strings.TrimSpace(source)).Scan(&method)
+	if err != nil || method == "" {
+		return "", false
+	}
+	return method, true
+}
+
+// SubmitOrReuseJob looks for an identical job (same method, source, dest_dir, and flags).
+// If one already exists in any state:
+//   - when force is false (or the job is already queued/running), it leaves the
+//     existing job untouched and returns it with SubmitOutcome = OutcomeExisting.
+//   - when force is true and the job is paused or finished (completed, failed,
+//     quarantined, cancelled), it resets the existing job back to queued under
+//     its existing ID and returns it with SubmitOutcome = OutcomeRequeued.
+//
+// Otherwise, it inserts a new job and returns it with SubmitOutcome = OutcomeCreated.
+func (s *Store) SubmitOrReuseJob(ctx context.Context, job *Job, force bool) (*Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	job.Source = strings.TrimSpace(job.Source)
+	flagsJSON := job.FlagsJSON()
+
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, method, source, dest_dir, flags_json, state, priority,
+		       created_at, started_at, finished_at, retry_count, max_retries,
+		       COALESCE(last_error, ''), COALESCE(quarantine_reason, ''),
+		       site, path
+		FROM jobs
+		WHERE method = ? AND source = ? AND dest_dir = ? AND flags_json = ?
+		ORDER BY
+			CASE state
+				WHEN 'running' THEN 0
+				WHEN 'queued' THEN 1
+				WHEN 'paused' THEN 2
+				ELSE 3
+			END ASC,
+			id DESC
+		LIMIT 1;
+	`, job.Method, job.Source, job.DestDir, flagsJSON)
+
+	existing, err := scanJob(row)
+	if err == nil {
+		if !force || existing.State == StateRunning || existing.State == StateQueued {
+			existing.SubmitOutcome = OutcomeExisting
+			return existing, nil
+		}
+
+		prio := existing.Priority
+		if job.Priority != 0 {
+			prio = job.Priority
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE jobs
+			SET state = 'queued',
+			    priority = ?,
+			    last_error = '',
+			    quarantine_reason = '',
+			    retry_count = 0,
+			    started_at = NULL,
+			    finished_at = NULL
+			WHERE id = ?;
+		`, prio, existing.ID)
+		if err != nil {
+			return nil, fmt.Errorf("re-queuing existing job %d: %w", existing.ID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+
+		existing.State = StateQueued
+		existing.Priority = prio
+		existing.LastError = ""
+		existing.QuarantineReason = ""
+		existing.RetryCount = 0
+		existing.StartedAt = nil
+		existing.FinishedAt = nil
+		existing.SubmitOutcome = OutcomeRequeued
+		return existing, nil
+	}
+	if !errors.Is(err, ErrJobNotFound) {
+		return nil, err
+	}
+
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+	if job.State == "" {
+		job.State = StateQueued
+	}
+	if job.MaxRetries <= 0 {
+		job.MaxRetries = 3
+	}
+	if job.Site == "" {
+		job.Site = ExtractRoot(job.Source, job.Method)
+	}
+	if job.Path == "" {
+		job.Path = ExtractPath(job.Source)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO jobs (
+			method, source, dest_dir, flags_json, state, priority,
+			created_at, retry_count, max_retries, site, path
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`, job.Method, job.Source, job.DestDir, flagsJSON, job.State, job.Priority,
+		job.CreatedAt, job.RetryCount, job.MaxRetries, job.Site, job.Path)
+	if err != nil {
+		return nil, fmt.Errorf("inserting job: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	job.ID = id
+	job.SubmitOutcome = OutcomeCreated
 	return job, nil
 }
 

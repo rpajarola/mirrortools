@@ -56,6 +56,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  -c, -config <path>   path to config.toml\n")
 	fmt.Fprintf(w, "  -s, -socket <path>   path to mirrord unix domain socket\n")
 	fmt.Fprintf(w, "  -d, -dest <dir>      override destination directory\n")
+	fmt.Fprintf(w, "  -f, -force           re-queue identical finished jobs\n")
 	fmt.Fprintf(w, "  -q, -quiet           suppress job enqueued confirmations\n")
 	fmt.Fprintf(w, "  -v, -version         print mirrorq version and exit\n")
 }
@@ -85,6 +86,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, isStdinTermin
 	var destDir string
 	fs.StringVar(&destDir, "dest", "", "override destination directory")
 	fs.StringVar(&destDir, "d", "", "override destination directory (shorthand)")
+
+	var force bool
+	fs.BoolVar(&force, "force", false, "re-queue identical finished jobs")
+	fs.BoolVar(&force, "f", false, "re-queue identical finished jobs (shorthand)")
 
 	var quiet bool
 	fs.BoolVar(&quiet, "quiet", false, "suppress job enqueued confirmations")
@@ -180,11 +185,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, isStdinTermin
 	client := daemon.NewUnixClient(sock)
 	ctx := context.Background()
 
+	if destDir != "" {
+		destDir = iconfig.ExpandHome(destDir)
+	}
+
 	hasError := false
 	for _, u := range urls {
 		sub := &daemon.SubmitRequest{
 			Source:  u,
 			DestDir: destDir,
+			Force:   force,
 		}
 		job, err := client.SubmitJob(ctx, sub)
 		if err != nil {
@@ -198,7 +208,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, isStdinTermin
 			continue
 		}
 		if !quiet {
-			fmt.Fprintf(stdout, "Enqueued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+			switch job.SubmitOutcome {
+			case daemon.OutcomeExisting:
+				fmt.Fprintf(stdout, "Job #%d already exists [%s] (%s: %s into %s)\n", job.ID, job.State, job.Method, job.Source, job.DestDir)
+			case daemon.OutcomeRequeued:
+				fmt.Fprintf(stdout, "Re-queued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+			default:
+				fmt.Fprintf(stdout, "Enqueued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+			}
 		}
 	}
 

@@ -446,10 +446,14 @@ Unix domain socket.
 .It Ic mirror queue list Op Fl state Ar states Op Fl site Ar site Op Fl prefix Ar prefix Op Fl limit Ar n
 List jobs in the queue, optionally filtering by comma-separated states,
 site, or URL prefix.
-.It Ic mirror queue submit Op Ar flags Ar source Op Ar destdir
+.It Ic mirror queue submit Op Fl force Op Ar flags Ar source Op Ar destdir
 (or
 .Ic mirror submit
 ) Enqueue a mirror job in the background daemon.
+If an identical job already exists, its existing job number is kept and no
+duplicate job is created; pass
+.Fl force
+to re-queue an identical finished or paused job under its existing job number.
 .It Ic mirror queue status Ar id
 Show detailed metadata, timings, and error status for a job.
 .It Ic mirror queue logs Op Fl f Ar id

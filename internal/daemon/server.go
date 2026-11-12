@@ -239,6 +239,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	req.Source = strings.TrimSpace(req.Source)
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -248,8 +249,12 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "" {
 		if m, ok := mirror.Detect(req.Source); ok {
 			req.Method = m.Name
-			if req.Method == "http" && git.ProbeHTTP(r.Context(), req.Source) {
-				req.Method = "git"
+			if req.Method == "http" {
+				if prev, ok := s.queue.FindMethodBySource(r.Context(), req.Source); ok && (prev == "http" || prev == "git") {
+					req.Method = prev
+				} else if git.ProbeHTTP(r.Context(), req.Source) {
+					req.Method = "git"
+				}
 			}
 		} else {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot auto-detect mirror method for source %q; specify method", req.Source))
@@ -273,11 +278,14 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
-	if req.DestDir == "" {
+	req.DestDir = strings.TrimSpace(req.DestDir)
+	if req.DestDir != "" {
+		req.DestDir = filepath.Clean(config.ExpandHome(req.DestDir))
+	} else {
 		if mc != nil && mc.DestDir != "" {
-			req.DestDir = mc.DestDir
+			req.DestDir = filepath.Clean(mc.DestDir)
 		} else if defaultDest != "" {
-			req.DestDir = defaultDest
+			req.DestDir = filepath.Clean(defaultDest)
 			m, _ := mirror.Get(req.Method)
 			if m != nil && m.Subdir != nil {
 				sub := m.Subdir(req.Source)
@@ -309,8 +317,16 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.broadcastEvent(fmt.Sprintf("job:enqueued:%d", job.ID))
-	writeJSON(w, http.StatusCreated, job)
+	switch job.SubmitOutcome {
+	case OutcomeExisting:
+		writeJSON(w, http.StatusOK, job)
+	case OutcomeRequeued:
+		s.broadcastEvent(fmt.Sprintf("job:enqueued:%d", job.ID))
+		writeJSON(w, http.StatusOK, job)
+	default:
+		s.broadcastEvent(fmt.Sprintf("job:enqueued:%d", job.ID))
+		writeJSON(w, http.StatusCreated, job)
+	}
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

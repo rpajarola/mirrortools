@@ -384,3 +384,107 @@ func TestStoreMigrationFromOldSchema(t *testing.T) {
 		t.Fatalf("expected path '/docs/api', got %q", j.Path)
 	}
 }
+
+func TestStoreSubmitOrReuseJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	newJob := func() *Job {
+		return &Job{
+			Method:  "sourceforge",
+			Source:  "https://sourceforge.net/projects/dedup/",
+			DestDir: "/tmp/dest",
+			Flags:   map[string]string{"wait": "1s"},
+		}
+	}
+
+	// 1. Initial submit creates job #1
+	j1, err := s.SubmitOrReuseJob(ctx, newJob(), false)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob initial: %v", err)
+	}
+	if j1.ID != 1 || j1.SubmitOutcome != OutcomeCreated || j1.State != StateQueued {
+		t.Fatalf("expected created job #1 in queued state, got %+v", j1)
+	}
+
+	// 2. Submitting while queued returns existing #1 (even with force=true)
+	for _, force := range []bool{false, true} {
+		dup, err := s.SubmitOrReuseJob(ctx, newJob(), force)
+		if err != nil {
+			t.Fatalf("SubmitOrReuseJob queued (force=%v): %v", force, err)
+		}
+		if dup.ID != j1.ID || dup.SubmitOutcome != OutcomeExisting || dup.State != StateQueued {
+			t.Fatalf("expected OutcomeExisting #1 queued (force=%v), got %+v", force, dup)
+		}
+	}
+
+	// 3. Claim to running; submitting while running returns existing #1 (even with force=true)
+	claimed, err := s.ClaimNextJob(ctx)
+	if err != nil || claimed.ID != j1.ID {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	for _, force := range []bool{false, true} {
+		dup, err := s.SubmitOrReuseJob(ctx, newJob(), force)
+		if err != nil {
+			t.Fatalf("SubmitOrReuseJob running (force=%v): %v", force, err)
+		}
+		if dup.ID != j1.ID || dup.SubmitOutcome != OutcomeExisting || dup.State != StateRunning {
+			t.Fatalf("expected OutcomeExisting #1 running (force=%v), got %+v", force, dup)
+		}
+	}
+
+	// 4. Finish as completed; submitting without force skips and returns existing #1
+	if err := s.FinishJob(ctx, j1.ID, StateCompleted, ""); err != nil {
+		t.Fatalf("FinishJob: %v", err)
+	}
+	dupCompleted, err := s.SubmitOrReuseJob(ctx, newJob(), false)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob completed: %v", err)
+	}
+	if dupCompleted.ID != j1.ID || dupCompleted.SubmitOutcome != OutcomeExisting || dupCompleted.State != StateCompleted {
+		t.Fatalf("expected OutcomeExisting #1 completed, got %+v", dupCompleted)
+	}
+
+	// 5. Submitting with force=true re-queues existing job #1 without allocating a new ID
+	requeued, err := s.SubmitOrReuseJob(ctx, newJob(), true)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob force requeue: %v", err)
+	}
+	if requeued.ID != j1.ID || requeued.SubmitOutcome != OutcomeRequeued || requeued.State != StateQueued {
+		t.Fatalf("expected OutcomeRequeued #1 queued, got %+v", requeued)
+	}
+	if requeued.StartedAt != nil || requeued.FinishedAt != nil {
+		t.Fatalf("expected timestamps cleared on requeue, got %+v", requeued)
+	}
+
+	// 6. Quarantine job #1; force=false leaves quarantined, force=true re-queues #1
+	if err := s.QuarantineJob(ctx, j1.ID, "rate limited"); err != nil {
+		t.Fatalf("QuarantineJob: %v", err)
+	}
+	dupQuarantined, err := s.SubmitOrReuseJob(ctx, newJob(), false)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob quarantined: %v", err)
+	}
+	if dupQuarantined.ID != j1.ID || dupQuarantined.SubmitOutcome != OutcomeExisting || dupQuarantined.State != StateQuarantined {
+		t.Fatalf("expected OutcomeExisting #1 quarantined, got %+v", dupQuarantined)
+	}
+
+	requeuedQ, err := s.SubmitOrReuseJob(ctx, newJob(), true)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob force quarantined: %v", err)
+	}
+	if requeuedQ.ID != j1.ID || requeuedQ.SubmitOutcome != OutcomeRequeued || requeuedQ.State != StateQueued || requeuedQ.QuarantineReason != "" {
+		t.Fatalf("expected OutcomeRequeued #1 cleared quarantine, got %+v", requeuedQ)
+	}
+
+	// 7. Different dest_dir or different flags creates a new job #2
+	diffDest := newJob()
+	diffDest.DestDir = "/tmp/other_dest"
+	j2, err := s.SubmitOrReuseJob(ctx, diffDest, false)
+	if err != nil {
+		t.Fatalf("SubmitOrReuseJob diffDest: %v", err)
+	}
+	if j2.ID != 2 || j2.SubmitOutcome != OutcomeCreated {
+		t.Fatalf("expected new job #2 for different dest_dir, got %+v", j2)
+	}
+}

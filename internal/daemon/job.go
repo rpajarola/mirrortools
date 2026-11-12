@@ -36,6 +36,15 @@ func (s State) IsTerminal() bool {
 	return s == StateCompleted || s == StateCancelled
 }
 
+// SubmitOutcome indicates how a submitted job was handled during deduplication.
+type SubmitOutcome string
+
+const (
+	OutcomeCreated  SubmitOutcome = "created"
+	OutcomeExisting SubmitOutcome = "existing"
+	OutcomeRequeued SubmitOutcome = "requeued"
+)
+
 // Job represents a single mirror request managed by the daemon queue.
 type Job struct {
 	ID               int64             `json:"id"`
@@ -54,6 +63,7 @@ type Job struct {
 	QuarantineReason string            `json:"quarantine_reason,omitempty"`
 	Site             string            `json:"site"`
 	Path             string            `json:"path"`
+	SubmitOutcome    SubmitOutcome     `json:"submit_outcome,omitempty"`
 }
 
 // ExtractRoot returns the site/root identifier for grouping URLs.
@@ -175,6 +185,7 @@ type SubmitRequest struct {
 	DestDir  string            `json:"dest_dir,omitempty"` // optional; uses config default if empty
 	Flags    map[string]string `json:"flags,omitempty"`
 	Priority int               `json:"priority,omitempty"`
+	Force    bool              `json:"force,omitempty"` // re-queue an identical finished job under its existing ID
 }
 
 // Validate checks that required fields are present in the request.

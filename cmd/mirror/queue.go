@@ -19,7 +19,7 @@ func queueUsage(w io.Writer) {
 	fmt.Fprintf(w, "usage: mirror queue <subcommand> [arguments]\n\n")
 	fmt.Fprintf(w, "subcommands:\n")
 	fmt.Fprintf(w, "  list [-state <s1,s2>] [-site <site>] [-prefix <prefix>] [-limit <n>]  list mirror jobs\n")
-	fmt.Fprintf(w, "  submit [flags] <source> [<destdir>] enqueue a mirror job in the daemon\n")
+	fmt.Fprintf(w, "  submit [-force] [flags] <source> [<destdir>]  enqueue a mirror job in the daemon\n")
 	fmt.Fprintf(w, "  status <id>                         show details for a job\n")
 	fmt.Fprintf(w, "  logs [-f] <id>                      show or stream logs for a job\n")
 	fmt.Fprintf(w, "  transfers [flags] <site>            view retrieved/failed/future/disabled transfers for a site\n")
@@ -496,12 +496,26 @@ func queueMain(args []string, cfg *config) {
 
 func submitMain(args []string, cfg *config) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Println("usage: mirror queue submit [flags] <source> [<destdir>]")
+		fmt.Println("usage: mirror queue submit [-force] [flags] <source> [<destdir>]")
+		return
+	}
+
+	var force bool
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "-force" || a == "--force" {
+			force = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if len(filtered) == 0 {
+		fmt.Println("usage: mirror queue submit [-force] [flags] <source> [<destdir>]")
 		return
 	}
 
 	// Resolve the arguments using the standard CLI resolver so flags & detection match
-	inv, err := resolve(args, cfg, os.Stderr)
+	inv, err := resolve(filtered, cfg, os.Stderr)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -516,6 +530,7 @@ func submitMain(args []string, cfg *config) {
 		Source:  inv.source,
 		DestDir: inv.dest,
 		Flags:   flagsMap,
+		Force:   force,
 	}
 
 	client := clientFromConfig(cfg)
@@ -524,7 +539,14 @@ func submitMain(args []string, cfg *config) {
 		handleClientError(err, cfg)
 	}
 
-	fmt.Printf("Enqueued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+	switch job.SubmitOutcome {
+	case daemon.OutcomeExisting:
+		fmt.Printf("Job #%d already exists [%s] (%s: %s into %s)\n", job.ID, job.State, job.Method, job.Source, job.DestDir)
+	case daemon.OutcomeRequeued:
+		fmt.Printf("Re-queued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+	default:
+		fmt.Printf("Enqueued job #%d (%s: %s into %s)\n", job.ID, job.Method, job.Source, job.DestDir)
+	}
 }
 
 func requireID(cmd string, args []string) int64 {

@@ -246,3 +246,96 @@ wait = "2s"
 		t.Fatalf("expected job to be enqueued, got: %s", stdout.String())
 	}
 }
+
+func TestMirrorqDeduplicationAndForce(t *testing.T) {
+	tempDir := t.TempDir()
+	sockPath := shortSocketPath(t)
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	store, err := daemon.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	hub := daemon.NewLogHub(100)
+	executor := &daemon.InProcessExecutor{
+		CustomRunners: map[string]func(ctx context.Context, source, destDir string, flags map[string]string, onLog daemon.LogFunc) error{
+			"sourceforge": func(ctx context.Context, source, destDir string, flags map[string]string, onLog daemon.LogFunc) error {
+				return nil
+			},
+		},
+	}
+	q := daemon.NewQueue(store, executor, hub, daemon.QueueConfig{Concurrency: 1})
+	ctx := context.Background()
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if err := q.Start(ctx); err != nil {
+		t.Fatalf("Queue.Start: %v", err)
+	}
+	t.Cleanup(func() { q.Stop() })
+
+	cfg := &iconfig.Config{
+		DestDir: filepath.Join(tempDir, "dest"),
+		Daemon:  iconfig.DaemonConfig{Socket: sockPath},
+	}
+	server := daemon.NewServer(q, cfg, "", nil)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen(unix): %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	httpServer := &http.Server{Handler: server}
+	go httpServer.Serve(listener)
+	t.Cleanup(func() { httpServer.Close() })
+
+	targetURL := "https://sourceforge.net/projects/same-proj/"
+
+	// 1. Passing the same URL twice in one invocation creates job #1 once and skips the second
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-socket", sockPath, targetURL, targetURL}, nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("run failed (%d): %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Enqueued job #1") {
+		t.Fatalf("expected Enqueued job #1, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Job #1 already exists [queued]") {
+		t.Fatalf("expected Job #1 already exists [queued], got:\n%s", out)
+	}
+	if strings.Contains(out, "#2") {
+		t.Fatalf("unexpected job #2 created:\n%s", out)
+	}
+
+	// 2. Mark job #1 completed; re-submitting without -f keeps job #1 completed and does not create #2
+	if err := store.FinishJob(ctx, 1, daemon.StateCompleted, ""); err != nil {
+		t.Fatalf("FinishJob: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"-socket", sockPath, targetURL}, nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("run completed dup failed (%d): %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Job #1 already exists [completed]") {
+		t.Fatalf("expected Job #1 already exists [completed], got:\n%s", stdout.String())
+	}
+
+	// 3. Re-submitting with -f re-queues job #1 under its existing ID
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"-socket", sockPath, "-f", targetURL}, nil, &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("run -f failed (%d): %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Re-queued job #1") {
+		t.Fatalf("expected Re-queued job #1, got:\n%s", stdout.String())
+	}
+
+	jobs, err := store.ListJobs(ctx, daemon.JobFilter{})
+	if err != nil || len(jobs) != 1 || jobs[0].ID != 1 || jobs[0].State != daemon.StateQueued {
+		t.Fatalf("expected single queued job #1, got %+v (err=%v)", jobs, err)
+	}
+}

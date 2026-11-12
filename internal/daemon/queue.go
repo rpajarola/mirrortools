@@ -242,7 +242,9 @@ func (q *Queue) runWorker(ctx context.Context, job *Job) {
 	}
 }
 
-// Enqueue adds a new job to the queue.
+// Enqueue adds a job to the queue, or returns an existing identical job
+// without creating a duplicate job ID (re-queuing finished jobs only when
+// req.Force is true).
 func (q *Queue) Enqueue(ctx context.Context, req *SubmitRequest) (*Job, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
@@ -257,13 +259,20 @@ func (q *Queue) Enqueue(ctx context.Context, req *SubmitRequest) (*Job, error) {
 		MaxRetries: q.maxRetries,
 	}
 
-	job, err := q.store.EnqueueJob(ctx, job)
+	job, err := q.store.SubmitOrReuseJob(ctx, job, req.Force)
 	if err != nil {
 		return nil, err
 	}
 
-	q.notify()
+	if job.SubmitOutcome == OutcomeCreated || job.SubmitOutcome == OutcomeRequeued {
+		q.notify()
+	}
 	return job, nil
+}
+
+// FindMethodBySource returns the method recorded for an existing job with source, if any.
+func (q *Queue) FindMethodBySource(ctx context.Context, source string) (string, bool) {
+	return q.store.FindMethodBySource(ctx, source)
 }
 
 // Pause pauses the queue (running jobs continue, but no new jobs start).

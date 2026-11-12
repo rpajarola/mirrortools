@@ -425,3 +425,82 @@ func TestServerWithAuth(t *testing.T) {
 		t.Fatalf("expected 401 after logout, got %d", rec.Code)
 	}
 }
+
+func TestServerSubmitDeduplication(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := context.Background()
+
+	// Pause queue initially so we can inspect queued state deterministically
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if err := q.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer q.Stop()
+
+	submit := func(payload map[string]any) (*httptest.ResponseRecorder, Job) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var j Job
+		_ = json.Unmarshal(rec.Body.Bytes(), &j)
+		return rec, j
+	}
+
+	// 1. First submit -> 201 Created, ID 1
+	rec, j1 := submit(map[string]any{
+		"source": "https://sourceforge.net/projects/dedup-srv/",
+	})
+	if rec.Code != http.StatusCreated || j1.ID != 1 || j1.SubmitOutcome != OutcomeCreated {
+		t.Fatalf("expected 201 Created #1, got code=%d job=%+v", rec.Code, j1)
+	}
+
+	// 2. Duplicate submit while queued (with whitespace & explicit trailing-slash dest_dir) -> 200 OK, ID 1
+	rec, jDup := submit(map[string]any{
+		"source":   "  https://sourceforge.net/projects/dedup-srv/  ",
+		"dest_dir": "/tmp/default_dest/",
+	})
+	if rec.Code != http.StatusOK || jDup.ID != j1.ID || jDup.SubmitOutcome != OutcomeExisting || jDup.State != StateQueued {
+		t.Fatalf("expected 200 OK OutcomeExisting #1 queued, got code=%d job=%+v", rec.Code, jDup)
+	}
+
+	// 3. Resume queue so job #1 runs to completion
+	if err := q.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	for range 50 {
+		got, _ := q.GetJob(ctx, j1.ID)
+		if got != nil && got.State == StateCompleted {
+			break
+		}
+		// brief yield via status call
+		_, _ = q.GetStatus(ctx)
+	}
+	// Pause again before testing re-submit
+	_ = q.Pause(ctx)
+	_ = q.store.FinishJob(ctx, j1.ID, StateCompleted, "")
+
+	// 4. Duplicate submit when completed -> 200 OK, OutcomeExisting, still completed, still only 1 job total
+	rec, jFin := submit(map[string]any{
+		"source": "https://sourceforge.net/projects/dedup-srv/",
+	})
+	if rec.Code != http.StatusOK || jFin.ID != j1.ID || jFin.SubmitOutcome != OutcomeExisting || jFin.State != StateCompleted {
+		t.Fatalf("expected 200 OK OutcomeExisting #1 completed, got code=%d job=%+v", rec.Code, jFin)
+	}
+
+	// 5. Force submit when completed -> 200 OK, OutcomeRequeued, reuses ID 1
+	rec, jForce := submit(map[string]any{
+		"source": "https://sourceforge.net/projects/dedup-srv/",
+		"force":  true,
+	})
+	if rec.Code != http.StatusOK || jForce.ID != j1.ID || jForce.SubmitOutcome != OutcomeRequeued || jForce.State != StateQueued {
+		t.Fatalf("expected 200 OK OutcomeRequeued #1 queued, got code=%d job=%+v", rec.Code, jForce)
+	}
+
+	jobs, err := q.ListJobs(ctx, JobFilter{})
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("expected exactly 1 job in store, got %d (err=%v)", len(jobs), err)
+	}
+}

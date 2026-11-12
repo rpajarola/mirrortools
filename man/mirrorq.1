@@ -9,6 +9,7 @@
 .Op Fl c Ar config
 .Op Fl s Ar socket
 .Op Fl d Ar dest
+.Op Fl f
 .Op Fl q
 .Op Ar url ...
 .Nm
@@ -31,6 +32,11 @@ For each URL,
 automatically detects the appropriate download method
 .Pq archiveorg , ftp , git , gopher , groupsio , http , rsync , or sourceforge
 and mirrors into the configured destination directory.
+If an identical job (same method, source, destination directory, and flags)
+already exists in any state (active, queued, or finished), no new job number
+is allocated and the existing job is left in its current state unless
+.Fl f
+is given.
 .Pp
 The flags are:
 .Bl -tag -width Ds
@@ -51,6 +57,9 @@ or
 .Ev $MIRRORD_SOCKET .
 .It Fl d , Fl dest Ar dir
 Override the destination directory for the enqueued jobs.
+.It Fl f , Fl force
+If an identical finished or paused job already exists, re-queue it under its
+existing job number instead of skipping it.
 .It Fl q , Fl quiet
 Suppress progress and confirmation messages; only errors are printed.
 .It Fl v , Fl version
